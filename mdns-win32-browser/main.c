@@ -7,6 +7,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <mdns.h>
+#include "scan-thread.h"
 
 #pragma comment(lib, "iphlpapi.lib")
 
@@ -126,7 +127,7 @@ static void update_position(struct control *c) {
 
 static SIZE get_text_size(HDC dc, const wchar_t *str, int xpad, int ypad) {
 	SIZE sz;
-	GetTextExtentPoint32(dc, str, wcslen(str), &sz);
+	GetTextExtentPoint32(dc, str, (int) wcslen(str), &sz);
 	sz.cx += xpad * 2;
 	sz.cy += ypad * 2;
 	return sz;
@@ -246,12 +247,23 @@ static void lookup_interfaces(struct mdns_browser *b) {
 	free(buf);
 }
 
+struct service {
+	struct text *text;
+	const char *svcname;
+};
+
+static const struct service g_services[] = {
+	{&STR_WEB_UI, "_http._tcp.local"}
+};
+
 static void add_services(struct mdns_browser *b) {
-	ComboBox_AddString(b->combo_service.h, get_text(&STR_WEB_UI));
+	for (size_t i = 0; i < sizeof(g_services) / sizeof(g_services[0]); i++) {
+		ComboBox_AddString(b->combo_service.h, get_text(g_services[i].text));
+	}
 }
 
 static void create_control(struct mdns_browser *b, struct control *c, LPCWSTR ClassName, LPCWSTR Text, DWORD style, int idc) {
-	c->h = CreateWindowW(ClassName, Text, style | WS_CHILD, c->x, c->y, c->cx, c->cy, b->window, (HMENU) idc, b->instance, NULL);
+	c->h = CreateWindowW(ClassName, Text, style | WS_CHILD, c->x, c->y, c->cx, c->cy, b->window, (HMENU) (uintptr_t) idc, b->instance, NULL);
 }
 
 LRESULT CALLBACK browser_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
@@ -291,17 +303,13 @@ LRESULT CALLBACK browser_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
 	}
 	case WM_COMMAND:
 		if (HIWORD(wparam) == BN_CLICKED && LOWORD(wparam) == IDC_OPEN) {
-			int idx = ComboBox_GetCurSel(b.combo_interface.h);
-			assert(idx < b.interface_num);
-			int fd = mdns_bind6(b.interface_ids[idx]);
 
-			struct mdns m = {0};
-			mdns_scan(&m, 0, MDNS_PTR, "_smb\0_tcp\0local\0", NULL, NULL, NULL);
-			char buf[512];
-			int w = mdns_next(&m, NULL, buf, sizeof(buf));
-			w = send(fd, buf, w, 0);
-
-			closesocket(fd);
+		} else if (HIWORD(wparam) == CBN_SELCHANGE) {
+			stop_scan_thread();
+			int ifidx = ComboBox_GetCurSel(b.combo_interface.h);
+			assert(ifidx < b.interface_num);
+			int svcidx = ComboBox_GetCurSel(b.combo_service.h);
+			start_scan_thread(b.window, b.interface_ids[ifidx], g_services[svcidx].svcname);
 		}
 		break;
 	case WM_SIZE:
@@ -310,6 +318,21 @@ LRESULT CALLBACK browser_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
 			update_positions(&b);
 		}
 		break;
+	case MSG_ADD: {
+		struct answer *a = (struct answer*) wparam;
+		ListBox_AddString(b.list_nodes.h, a->name);
+		free(a);
+		break;
+	}
+	case MSG_REMOVE: {
+		struct answer *a = (struct answer*) wparam;
+		int idx = ListBox_FindString(b.list_nodes.h, 0, a->name);
+		if (idx != LB_ERR) {
+			ListBox_DeleteString(b.list_nodes.h, idx);
+		}
+		free(a);
+		break;
+	}
 	}
 
 	return DefWindowProcW(hwnd, msg, wparam, lparam);

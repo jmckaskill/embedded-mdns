@@ -7,11 +7,11 @@
 
 #pragma comment(lib, "ws2_32.lib")
 
-int mdns_bind6(int interface_id) {
+int emdns_bind6(int interface_id) {
 	WSADATA wsa_data;
 	WSAStartup(MAKEWORD(2,2), &wsa_data);
 
-	int fd = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+	int fd = (int) socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
 	if (fd < 0) {
 		return -1;
 	}

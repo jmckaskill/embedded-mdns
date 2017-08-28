@@ -29,13 +29,13 @@ int main(int argc, char *argv[]) {
 		return 2;
 	}
 
-	int fd = mdns_bind6(interface_id);
+	int fd = emdns_bind6(interface_id);
 
-	struct mdns m = {0};
-	mdns_scan(&m, 0, MDNS_AAAA, argv[2], NULL, NULL, NULL);
+	struct emdns m = {0};
+	//emdns_scan(&m, 0, MDNS_AAAA, argv[2], NULL, NULL, NULL);
 
 	char buf[512];
-	int w = mdns_next(&m, NULL, buf, sizeof(buf));
+	int w = emdns_next(&m, NULL, buf, sizeof(buf));
 	send(fd, buf, w, 0);
 
 	closesocket(fd);
