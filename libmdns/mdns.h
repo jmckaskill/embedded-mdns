@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdint.h>
+
 // maximum concurrent queries and scans
 #define MDNS_MAX_REQUESTS 16
 
@@ -34,7 +36,7 @@ int mdns_next(struct mdns *m, mdns_time *time, void *buf, int sz);
 int mdns_process(struct mdns *m, mdns_time time, const struct sockaddr *sa, int sasz, const void *msg, int sz);
 
 enum mdns_rtype {
-    MDNS_AAAA = ??,
+    MDNS_AAAA = 28,
     MDNS_SRV = 33,
     MDNS_TXT = 16,
     MDNS_PTR = 12,
@@ -45,11 +47,11 @@ struct mdns_record {
     unsigned authoritative : 1;
     unsigned found : 1;
     enum mdns_rtype type;
-    const char *name;
+    const char *name; // double null-terminated host name
     union {
         const char *AAAA; // hostname
         struct {
-            const char *host; // fully qualified host name including trailing dot
+            const char *host; // double null-terminated fully qualified host name 
             uint16_t port;
             int priority;
             int weight;
@@ -85,7 +87,7 @@ typedef void (*mdns_cb)(void *udata, const struct mdns_record*);
 // possible errors include:
 // MDNS_TOO_MANY - too many concurrent requests
 // MDNS_MALFORMED - malformed request record
-int mdns_query(struct mdns *m, mdns_time time, const struct mdns_record *want, void *udata, mdns_cb cb);
+int mdns_query(struct mdns *m, mdns_time time, enum mdns_rtype type, const char *name, void *udata, mdns_cb cb);
 
 // mdns_scan starts a continuous scan
 // add will be called as results are found
@@ -97,28 +99,31 @@ int mdns_query(struct mdns *m, mdns_time time, const struct mdns_record *want, v
 // possible errors include:
 // MDNS_TOO_MANY - too many concurrent requests
 // MDNS_MALFORMED - malformed request record
-int mdns_scan(struct mdns *m, mdns_time time, const struct mdns_record *want, void *udata, mdns_cb add, mdns_cb remove);
+int mdns_scan(struct mdns *m, mdns_time time, enum mdns_rtype type, const char *name, void *udata, mdns_cb add, mdns_cb remove);
 
 // mdns_stop stops a pending scan, query or publish
 int mdns_stop(struct mdns *m, int ref);
 
-// mdns_create_socket creates and binds an IPv6 socket bound to the correct port
+// mdns_bind6 creates and binds an IPv6 socket bound to the correct port
 // with the request multicast address setup.
+// sa returns the address packets should be sent to/from
 // the socket is bound to the interface specified
 // this is only implemented for mainstream operating systems
-int mdns_create_socket(int interface);
+int mdns_bind6(int interface_id);
 
 // internal implementation
 
 struct mdns_request {
     struct mdns_request *next_to_start;
-    struct mdns_record want;
+	enum mdns_type type;
     mdns_cb add;
     mdns_cb remove;
     void *udata;
     int64_t next;
     unsigned valid : 1;
     unsigned query : 1;
+	uint8_t namesz;
+	uint8_t name[256];
 };
 
 struct mdns_publish {
@@ -129,7 +134,9 @@ struct mdns_publish {
 };
 
 struct mdns {
-    struct mdns_request requestv[MDNS_MAX_REQUEST];
+    struct mdns_request requestv[MDNS_MAX_REQUESTS];
     struct mdns_publish publishv[MDNS_MAX_PUBLISH];
     unsigned new_to_publish : 1;
+	int request_num;
+	int publish_num;
 };
