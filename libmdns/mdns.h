@@ -1,12 +1,17 @@
 #pragma once
 
 #include <stdint.h>
+#include "heap-inl.h"
+
+struct sockaddr;
 
 // maximum concurrent queries and scans
 #define MDNS_MAX_REQUESTS 16
 
 // maximum number of entries to publish
-#define MDNS_MAX_PUBLISH 16
+#define MDNS_MAX_PUBLISH 8
+
+#define MDNS_MAX_RESPONSES 32
 
 // main structure for the library
 // should be zero initialized
@@ -73,7 +78,8 @@ int mdns_publish(struct mdns *m, mdns_time time, const struct mdns_record *rec);
 // mdns_cb is the callback type used by mdns_scan and mdns_query
 // the provided record uses temporary memory
 // the application should copy it and the member variable strings out if required
-typedef void (*mdns_cb)(void *udata, const struct mdns_record*);
+typedef void (*mdns_addcb)(void *udata, const char *name, const struct sockaddr_in6 *sa, const char *txt);
+typedef void (*mdns_rmcb)(void *udata, const char *name);
 
 // mdns_query starts a one-shot DNS query
 // the callback will be called with the first valid response or on timeout
@@ -99,7 +105,7 @@ int mdns_query(struct mdns *m, mdns_time time, enum mdns_rtype type, const char 
 // possible errors include:
 // MDNS_TOO_MANY - too many concurrent requests
 // MDNS_MALFORMED - malformed request record
-int mdns_scan(struct mdns *m, mdns_time time, enum mdns_rtype type, const char *name, void *udata, mdns_cb add, mdns_cb remove);
+int mdns_scan(struct mdns *m, mdns_time time, enum mdns_rtype type, const char *name, void *udata, mdns_addcb add, mdns_rmcb remove);
 
 // mdns_stop stops a pending scan, query or publish
 int mdns_stop(struct mdns *m, int ref);
@@ -114,29 +120,39 @@ int mdns_bind6(int interface_id);
 // internal implementation
 
 struct mdns_request {
-    struct mdns_request *next_to_start;
-	enum mdns_type type;
+    struct heap_node hn;
+	enum mdns_rtype type;
     mdns_cb add;
     mdns_cb remove;
     void *udata;
     int64_t next;
-    unsigned valid : 1;
     unsigned query : 1;
 	uint8_t namesz;
 	uint8_t name[256];
 };
 
+struct mdns_response {
+    struct heap_node hn;
+    uint8_t namesz;
+    uint8_t name[64];
+};
+
 struct mdns_publish {
-    struct mdns_record rec;
-    int64_t next;
-    unsigned valid : 1;
-    unsigned published : 1;
+    struct heap_node hn;
+    enum mdns_rtype type;
+    uint8_t namesz, datasz;
+    uint8_t name[256];
+    uint8_t data[256];
 };
 
 struct mdns {
     struct mdns_request requestv[MDNS_MAX_REQUESTS];
+    struct mdns_response responsev[MDNS_MAX_RESPONSES];
     struct mdns_publish publishv[MDNS_MAX_PUBLISH];
-    unsigned new_to_publish : 1;
-	int request_num;
-	int publish_num;
+    struct mdns_request *to_publish;
+    struct mdns_request *to_republish;
+    struct mdns_request *free_request;
+    struct mdns_response *free_response;
+    int responses_used;
+    int requests_used;
 };

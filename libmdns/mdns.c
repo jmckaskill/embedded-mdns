@@ -47,10 +47,12 @@ static int copy_to_dns_name(uint8_t *buf, const char *src) {
 	int total = 0;
 
 	for (;;) {
-		size_t len = strlen(src);
-		if (len == 0) {
+		char *dot = strchr(src, '.');
+		if (dot == src || !dot) {
 			break;
-		} else if (len > 63) {
+		}
+		size_t len = dot - src;
+		if (len > 63) {
 			return -1;
 		}
 
@@ -74,7 +76,7 @@ static int copy_to_dns_name(uint8_t *buf, const char *src) {
 	return total;
 }
 
-int mdns_scan(struct mdns *m, mdns_time time, enum mdns_type type, const char *name, void *udata, mdns_cb add, mdns_cb remove) {
+int mdns_scan(struct mdns *m, mdns_time time, enum mdns_rtype type, const char *name, void *udata, mdns_cb add, mdns_cb remove) {
 	int id;
 	for (id = 0; id < MDNS_MAX_REQUESTS; id++) {
 		if (!m->requestv[id].valid) {

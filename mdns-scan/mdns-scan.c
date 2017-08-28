@@ -5,6 +5,9 @@
 #pragma comment(lib, "iphlpapi.lib")
 #else
 #include <unistd.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <net/if.h>
 #define closesocket(fd) close(fd)
 #endif
 
