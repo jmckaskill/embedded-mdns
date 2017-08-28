@@ -293,7 +293,7 @@ LRESULT CALLBACK browser_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
 		if (HIWORD(wparam) == BN_CLICKED && LOWORD(wparam) == IDC_OPEN) {
 			int idx = ComboBox_GetCurSel(b.combo_interface.h);
 			assert(idx < b.interface_num);
-			int fd = mdns_create_socket(b.interface_ids[idx]);
+			int fd = mdns_bind6(b.interface_ids[idx]);
 
 			struct mdns m = {0};
 			mdns_scan(&m, 0, MDNS_PTR, "_smb\0_tcp\0local\0", NULL, NULL, NULL);
@@ -329,7 +329,7 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE previnst, PWSTR cmdline, int nCmd
 
 	MSG msg;
 	while (GetMessageW(&msg, NULL, 0, 0)) {
-		//TranslateMessage(&msg);
+		TranslateMessage(&msg);
 		DispatchMessage(&msg);
 	}
 

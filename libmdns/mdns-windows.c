@@ -7,7 +7,7 @@
 
 #pragma comment(lib, "ws2_32.lib")
 
-int mdns_create_socket(int interface_id) {
+int mdns_bind6(int interface_id) {
 	WSADATA wsa_data;
 	WSAStartup(MAKEWORD(2,2), &wsa_data);
 
