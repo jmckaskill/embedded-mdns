@@ -6,6 +6,7 @@
 
 struct answer {
 	struct sockaddr_in6 addr;
+	char *text;
 	wchar_t name[1];
 };
 

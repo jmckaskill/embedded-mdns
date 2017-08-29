@@ -23,6 +23,8 @@ static struct text STR_OPEN = {L"Open", L"Öffnen"};
 static struct text STR_IP = {L"IP", L"IP"};
 static struct text STR_PORT = {L"Port", L"Port"};
 static struct text STR_WEB_UI = {L"Web UI (_http._tcp)", L"Web UI (_http._tcp)"};
+static struct text STR_ERROR = {L"Error", L"Error"};
+static struct text STR_NO_INTERFACES = {L"No valid interfaces found", L"No valid interfaces found"};
 
 static int wfrom_hex(wchar_t ch) {
 	if (L'0' <= ch && ch <= L'9') {
@@ -227,16 +229,18 @@ static void lookup_interfaces(struct mdns_browser *b) {
 		int idx = 0;
 
 		for (IP_ADAPTER_ADDRESSES *addr = buf; addr != NULL && idx < MAX_INTERFACES; addr = addr->Next) {
-			wchar_t buf[256];
 			switch (addr->IfType) {
 			case IF_TYPE_ETHERNET_CSMACD:
 			case IF_TYPE_PPP:
 			case IF_TYPE_SOFTWARE_LOOPBACK:
 			case IF_TYPE_IEEE80211:
-				_snwprintf(buf, sizeof(buf), L"%s (%s)", addr->FriendlyName, addr->Description);
-				buf[sizeof(buf)/sizeof(buf[0])-1] = L'\0';
-				b->interface_ids[idx++] = addr->IfIndex;
-				SendMessageW(b->combo_interface.h, CB_ADDSTRING, 0, (LPARAM) buf);
+				if (addr->Flags & IP_ADAPTER_IPV6_ENABLED) {
+					wchar_t buf[256];
+					_snwprintf(buf, sizeof(buf), L"%s (%s)", addr->FriendlyName, addr->Description);
+					buf[sizeof(buf) / sizeof(buf[0]) - 1] = L'\0';
+					b->interface_ids[idx++] = addr->IfIndex;
+					SendMessageW(b->combo_interface.h, CB_ADDSTRING, 0, (LPARAM) buf);
+				}
 				break;
 			}
 		}
@@ -297,8 +301,16 @@ LRESULT CALLBACK browser_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
 
 		lookup_interfaces(&b);
 		add_services(&b);
+
+		if (!b.interface_num) {
+			MessageBoxW(hwnd, get_text(&STR_NO_INTERFACES), get_text(&STR_ERROR), MB_OK);
+			PostQuitMessage(1);
+			break;
+		}
+
 		ComboBox_SetCurSel(b.combo_interface.h, 0);
 		ComboBox_SetCurSel(b.combo_service.h, 0);
+		start_scan_thread(b.window, b.interface_ids[0], g_services[0].svcname);
 		break;
 	}
 	case WM_COMMAND:
@@ -321,6 +333,7 @@ LRESULT CALLBACK browser_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
 	case MSG_ADD: {
 		struct answer *a = (struct answer*) wparam;
 		ListBox_AddString(b.list_nodes.h, a->name);
+		free(a->text);
 		free(a);
 		break;
 	}

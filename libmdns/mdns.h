@@ -1,5 +1,11 @@
 #pragma once
 
+#ifdef _WIN32
+#include <WinSock2.h>
+#include <WS2tcpip.h>
+#else
+#endif
+
 #include <stdint.h>
 #include "heap-inl.h"
 
@@ -12,6 +18,8 @@ struct sockaddr;
 #define EMDNS_MAX_PUBLISH 8
 
 #define EMDNS_MAX_ANSWERS 32
+
+#define EMDNS_MAX_TXT_SIZE 256
 
 // main structure for the library
 // should be zero initialized
@@ -41,14 +49,13 @@ int emdns_next(struct emdns *m, emdns_time *time, void *buf, int sz);
 int emdns_process(struct emdns *m, emdns_time time, const void *msg, int sz);
 
 int emdns_set_host(struct emdns *m, const char *name);
-
 int emdns_publish_ip6(struct emdns *m, const struct in6_addr *addr);
-int emdns_publish_service(struct emdns *m, const char *svc, const char *label, const char *txt, uint16_t port);
+int emdns_publish_service(struct emdns *m, const char *svc, const char *txt, uint16_t port);
 
 // emdns_cb is the callback type used by emdns_scan and emdns_query
 // the provided record uses temporary memory
 // the application should copy it and the member variable strings out if required
-typedef void (*emdns_addcb)(void *udata, const char *name, const struct sockaddr_in6 *sa, const char *txt);
+typedef void (*emdns_addcb)(void *udata, const char *name, const struct sockaddr_in6 *sa, const char *txt, size_t txtsz);
 typedef void (*emdns_rmcb)(void *udata, const char *name);
 
 // emdns_query starts a one-shot DNS query
@@ -101,24 +108,38 @@ struct emdns_request;
 struct emdns_answer {
 	struct emdns_answer *next;
 	struct emdns_request *subrequest;
-	emdns_time ttl;
-	uint8_t namesz;
-	uint8_t name[64];
+	struct emdns_request *owner;
+	unsigned have_txt : 1;
+	unsigned have_srv : 1;
+	unsigned have_aaaa : 1;
+	emdns_time expiry;
+	struct sockaddr_in6 sa;
+	uint16_t txtsz;
+	uint8_t labelsz;
+	uint8_t hostsz;
+	uint8_t label[64];
+	uint8_t txt[EMDNS_MAX_TXT_SIZE];
+	uint8_t host[256];
 };
 
 struct emdns_request {
     struct heap_node hn;
 	struct emdns_request *next;
     emdns_time next_request;
-	emdns_time duration;
+	int wait_duration;
 	enum emdns_request_type type;
     emdns_addcb add;
     emdns_rmcb remove;
     void *udata;
 	struct emdns_answer *answers;
-	uint16_t nameoff;
 	uint8_t namesz;
 	uint8_t name[256];
+};
+
+enum emdns_publish_type {
+	EMDNS_NO_PUBLISH,
+	EMDNS_PUBLISH_AAAA,
+	EMDNS_PUBLISH_SERVICE,
 };
 
 struct emdns_publish {
@@ -126,17 +147,18 @@ struct emdns_publish {
 	struct emdns_publish *next;
 	emdns_time next_announce;
     emdns_time last_publish;
-    unsigned is_service : 1;
+	int wait_duration;
+	enum emdns_publish_type type;
     union {
         struct in6_addr ip6;
         struct {
             uint16_t port;
-            const char *txt;
-            uint8_t svcoff;
+			uint16_t txtsz;
+			uint8_t namesz;
+			uint8_t name[256];
+			uint8_t txt[EMDNS_MAX_TXT_SIZE];
         } svc;
     } data;
-    uint8_t namesz;
-    uint8_t name[256];
 };
 
 struct emdns {
@@ -153,4 +175,8 @@ struct emdns {
 	int publish_used;
 	struct heap publish_heap;
 	struct heap request_heap;
+
+	struct emdns_publish *publish_ips;
+	uint8_t hostsz;
+	uint8_t host[256];
 };

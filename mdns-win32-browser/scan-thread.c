@@ -2,12 +2,37 @@
 #include <mdns.h>
 #include <assert.h>
 
+#ifdef _MSC_VER
+#define strdup(a) _strdup(a)
+#endif
+
 #pragma comment(lib, "ws2_32.lib")
 
 static HANDLE g_thread = INVALID_HANDLE_VALUE;
 static HWND g_window;
 static int g_interface_id;
 static HANDLE g_stop_event;
+
+static struct answer *create_answer(const char *name) {
+	size_t u16len = MultiByteToWideChar(CP_UTF8, 0, name, -1, NULL, 0);
+	struct answer *ret = (struct answer*) malloc(sizeof(struct answer) * u16len * 2);
+	MultiByteToWideChar(CP_UTF8, 0, name, -1, ret->name, u16len);
+	return ret;
+}
+
+static void onadd(void *udata, const char *name, const struct sockaddr_in6 *sa, const char *txt, size_t txtsz) {
+	struct answer *a = create_answer(name);
+	a->text = (char*) malloc(txtsz + 1);
+	memcpy(a->text, txt, txtsz);
+	a->text[txtsz] = '\0';
+	memcpy(&a->addr, sa, sizeof(a->addr));
+	PostMessage(g_window, MSG_ADD, (WPARAM) a, 0);
+}
+
+static void onrm(void *udata, const char *name) {
+	struct answer *a = create_answer(name);
+	PostMessage(g_window, MSG_ADD, (WPARAM) a, 0);
+}
 
 static DWORD WINAPI scan_thread(LPVOID param) {
 	const char *svc = (char*) param;
@@ -20,14 +45,14 @@ static DWORD WINAPI scan_thread(LPVOID param) {
 	WSAEventSelect(fd, ev, FD_READ);
 
 	struct emdns m = {0};
-	emdns_query_aaaa(&m, svc, NULL, NULL);
+	emdns_scan(&m, svc, NULL, &onadd, &onrm);
 
 	for (;;) {
+		char buf[1024];
 		int timeout;
 		for (;;) {
 			emdns_time now = (emdns_time) GetTickCount64();
 			emdns_time next = now;
-			char buf[1024];
 			int w = emdns_next(&m, &next, buf, sizeof(buf));
 			if (w == EMDNS_PENDING) {
 				timeout = next - now;
@@ -37,11 +62,24 @@ static DWORD WINAPI scan_thread(LPVOID param) {
 		}
 
 		HANDLE events[2] = {ev, g_stop_event};
-		if (WaitForMultipleObjects(2, events, FALSE, timeout) == WAIT_OBJECT_0) {
+		switch (WaitForMultipleObjects(2, events, FALSE, timeout)) {
+		case WAIT_OBJECT_0:
+			for (;;) {
+				int w = recv(fd, buf, sizeof(buf), 0);
+				if (w < 0) {
+					break;
+				}
+				emdns_process(&m, (emdns_time) GetTickCount64(), buf, w);
+			}
 			break;
+		case WAIT_TIMEOUT:
+			break;
+		default:
+			goto end;
 		}
 	}
 
+end:
 	CloseHandle(ev);
 	closesocket(fd);
 

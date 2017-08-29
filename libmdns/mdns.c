@@ -1,26 +1,42 @@
 #include "mdns.h"
 #include <assert.h>
 #include <string.h>
+#include <stdbool.h>
 
 #ifndef container_of
 #define container_of(ptr, type, member) ((type*) ((char*) (ptr) - offsetof(type, member)))
 #endif
 
 #define MIN_MESSAGE_SIZE 512
+
 #define RCLASS_IN 1
+
 #define RTYPE_AAAA 28
 #define RTYPE_SRV 33
 #define RTYPE_TXT 16
 #define RTYPE_PTR 12
 #define RTYPE_NSEC 47
+
 #define LABEL_MASK 0xC0
 #define LABEL_NORMAL 0x00
 #define LABEL_PTR 0xC0
+
 #define FLAG_RESPONSE 0x80
+
+#define TTL_DEFAULT 120
+#define PRIORITY_DEFAULT 0
+#define WEIGHT_DEFAULT 0
 
 static void put_big_16(uint8_t *u, uint16_t v) {
 	u[0] = (uint8_t) (v >> 8);
 	u[1] = (uint8_t) v;
+}
+
+static void put_big_32(uint8_t *u, uint32_t v) {
+	u[0] = (uint8_t) (v >> 24);
+	u[1] = (uint8_t) (v >> 16);
+	u[2] = (uint8_t) (v >> 8);
+	u[3] = (uint8_t) (v);
 }
 
 static uint16_t big_16(uint8_t *u) {
@@ -107,218 +123,23 @@ static struct emdns_publish *new_publish(struct emdns *m) {
 }
 
 static void free_publish(struct emdns *m, struct emdns_publish *r) {
-	assert(r->rtype);
-	r->rtype = 0;
 	r->next = m->free_publish;
 	m->free_publish = r;
 	heap_remove(&m->publish_heap, &r->hn, &compare_publish);
 }
 
-int emdns_next(struct emdns *m, emdns_time *time, void *buf, int sz) {
-	assert(sz >= MIN_MESSAGE_SIZE);
-	uint8_t *u = (uint8_t*) buf;
-	put_big_16(u, 0); // transaction ID
-	put_big_16(u+2, 0); // flags
-	// will fill out questions later
-	put_big_16(u+6, 0); // answers
-	put_big_16(u+8, 0); // authority
-	put_big_16(u+10, 0); // additional
-
-	uint8_t *p = u + 12;
-	uint16_t num_questions = 0;
-
-	for (;;) {
-		struct heap_node *hn = heap_min(&m->request_heap);
-		struct emdns_request *r = container_of(hn, struct emdns_request, hn);
-		if (r->next_request > *time) {
-			*time = r->next_request;
-			break;
-		}
-
-		int reqsz = r->namesz + 4;
-		if (r->type == EMDNS_QUERY_TXT_SRV) {
-			reqsz += 6;
-		}
-
-		if (p + reqsz > u + sz) {
-			// too many questions. we'll ask more in the next message
-			break;
-		}
-
-		r->next_request = *time + r->duration;
-		if (r->duration < 60 * 60 * 1000) {
-			// cap the exponential increase at an hour per the rfc
-			r->duration *= 2;
-		}
-
-		r->nameoff = (uint16_t) (p - u);
-		num_questions++;
-		memcpy(p, r->name, r->namesz);
-		p += r->namesz;
-
-		switch (r->type) {
-		case EMDNS_QUERY_AAAA:
-			put_big_16(p, RTYPE_AAAA);
-			put_big_16(p + 2, RCLASS_IN);
-			p += 4;
-			break;
-		case EMDNS_QUERY_TXT_SRV:
-			// this is actually two questions using the same name
-			num_questions++;
-			put_big_16(p, RTYPE_TXT);
-			put_big_16(p + 2, RCLASS_IN);
-			put_big_16(p + 4, COMPRESSED_NAME_FLAG | r->nameoff);
-			put_big_16(p + 6, RTYPE_SRV);
-			put_big_16(p + 8, RCLASS_IN);
-			p += 10;
-			break;
-		case EMDNS_SCAN_PTR:
-			put_big_16(p, RTYPE_PTR);
-			put_big_16(p + 2, RCLASS_IN);
-			p += 4;
-			break;
-		}
-	}
-
-	put_big_16(u + 4, num_questions);
-	assert(p - u <= sz);
-	if (num_questions) {
-		return (int) (p - u);
-	}
-
-	return EMDNS_PENDING;
-}
-
-#define MAX_LABEL_REDIRECTS 5
-
-// buf must be 256 bytes long to allow for the trailing 0 length label
-static int decode_dns_name(uint8_t *buf, const uint8_t* *msg, int sz, int *poff) {
-	int redirects = 0;
-	int w = 0;
-	int off = *poff;
-
-	for (;;) {
-		if (off >= sz) {
-			return -1;
-		}
-		
-		int type = msg[off] & LABEL_MASK;
-
-		switch (type) {
-		case LABEL_PTR: {
-				if (off + 3 > sz || ++redirects >= MAX_LABEL_REDIRECTS) {
-					return -1;
-				}
-				off = (int) big_16(off+1);
-				redirects++;
-				if (poff) {
-					*poff += 3;
-					poff = NULL;
-				}
-			}
-			break;
-		case LABEL_NORMAL: {
-				int labelsz = msg[off];
-
-				if (labelsz == 0) {
-					buf[w++] = 0;
-					if (poff) {
-						(*poff)++;
-					}
-					return w;
-				}
-
-				if (off + 1 + labelsz > sz || w + 1 + labelsz > 255) {
-					return -1;
-				}
-
-				memcpy(buf+w, msg+off, 1+labelsz);
-				off += 1 + labelsz;
-				w += 1 + labelsz;
-
-				if (poff) {
-					*poff = off;
-				}
-			}
-			break;
-		default:
-			return -1;
-		}
-	}
-}
-
-int emdns_process(struct emdns *m, emdns_time time, const void *msg, int sz) {
-	if (sz < 12) {
-		return EMDNS_MALFORMED;
-	}
-	uint8_t *u = (uint8_t*) msg;
-	uint16_t flags = big_16(u+2);
-	uint16_t question_num = big_16(u+4);
-	uint16_t answer_num = big_16(u+6);
-	uint16_t auth_num = big_16(u+8);
-	uint16_t additional_num = big_16(u+10);
-	int off = 12;
-
-	while (question_num--) {
-		uint8_t name[256];
-		int namesz = decode_dns_name(name, u, sz, &off);
-		if (namesz < 0 || off + 4 > sz) {
-			return EMDNS_MALFORMED;
-		}
-
-		uint16_t rtype = big_16(u+off);
-		uint16_t rclass = big_16(u+off+2);
-		off += 4;
-
-		// per the rfc only questions in request messages should be processed
-		if ((flags & FLAG_RESPONSE) == 0 && rclass == RCLASS_IN && rtype) {
-			for (int i = 0; i < m->publish_used; i++) {
-				struct mdns_publish *p = &m->publishv[i];
-				// p->rtype == 0 for a no longer used publish
-				// we've already checked that rtype != 0 above
-				// per the mdns rfc don't publish more than once a second
-				if (p->rtype == rtype && time - p->last_publish > 1000) {
-					heap_remove(&m->publish_heap, &p->hn, &compare_publish);
-					m->next_announce = time;
-					heap_insert(&m->publish_heap, &p->hn, &compare_publish);
-				}
-			}
-		}
-	}
-
-	while (answer_num--) {
-		uint8_t name[256];
-		int namesz = decode_dns_name(name, u, sz, &off);
-		if (namesz < 0 || off + 10 > sz) {
-			return EMDNS_MALFORMED;
-		}
-
-		uint16_t rtype = big_16(u+off);
-		uint16_t rclass = big_16(u+off+2);
-		uint32_t ttl = big_32(u+off+4);
-		uint16_t datasz = big_16(u+off+8);
-		off += 10;
-
-		if (off + datasz > sz) {
-			return EMDNS_MALFORMED;
-		}
-
-		if ((flags & FLAG_RESPONSE) == 0) && rclass == RCLASS_IN && rtype == RTYPE_PTR) {
-			// we have a known address field
-			// check to see if it's ours and remove the publish
-		}
-	}
-}
-
 // copies a dot separated string into dns form
 // returns length of new list or -ve on error
 // buf must be 256 bytes long
-static int copy_to_dns_name(uint8_t *buf, const char *src) {
+static int encode_dns_name(uint8_t *buf, const char *src) {
 	int total = 0;
 
 	for (;;) {
-		char *dot = strchr(src, '.');
-		if (dot == src || !dot) {
+		const char *dot = strchr(src, '.');
+		if (!dot) {
+			dot = src + strlen(src);
+		}
+		if (dot == src) {
 			break;
 		}
 		size_t len = dot - src;
@@ -333,7 +154,7 @@ static int copy_to_dns_name(uint8_t *buf, const char *src) {
 		}
 
 		buf[0] = (uint8_t) len;
-		memcpy(buf+1, src, len);
+		memcpy(buf + 1, src, len);
 
 		buf += 1 + len;
 		src += len + 1;
@@ -346,36 +167,653 @@ static int copy_to_dns_name(uint8_t *buf, const char *src) {
 	return total;
 }
 
-#if 0
-int emdns_scan(struct mdns *m, mdns_time time, enum mdns_rtype type, const char *name, void *udata, mdns_cb add, mdns_cb remove) {
-	int id;
-	for (id = 0; id < EMDNS_MAX_REQUESTS; id++) {
-		if (!m->requestv[id].valid) {
+#define MAX_LABEL_REDIRECTS 5
+
+// decodes a dns name from an incoming message, decompressing as we go
+// buf must be 256 bytes long
+// poff points to the current offset into the message
+// it is updated to the offset of the next field after the name
+static int decode_dns_name(uint8_t *buf, const void *msg, int sz, uint16_t *poff) {
+	int redirects = 0;
+	int w = 0;
+	uint16_t off = *poff;
+	uint8_t *u = (uint8_t*) msg;
+
+	for (;;) {
+		if (off >= sz) {
+			return -1;
+		}
+
+		uint8_t labelsz = u[off++];
+
+		switch (labelsz & LABEL_MASK) {
+		case LABEL_PTR:
+			if (off == sz || ++redirects >= MAX_LABEL_REDIRECTS) {
+				return -1;
+			}
+			off = (uint16_t) ((labelsz &~LABEL_MASK) << 8) | (uint16_t) u[off++];
+			redirects++;
+			if (poff) {
+				*poff = off;
+				poff = NULL;
+			}
+			break;
+		case LABEL_NORMAL:
+			if (labelsz == 0) {
+				buf[w++] = 0;
+				if (poff) {
+					*poff = off;
+				}
+				return w;
+			}
+
+			off--;
+			if (off + 1 + labelsz > sz || w + 1 + labelsz > 255) {
+				return -1;
+			}
+
+			memcpy(buf + w, u + off, 1 + labelsz);
+			off += 1+ labelsz;
+			w += 1 + labelsz;
+
+			if (poff) {
+				*poff = off;
+			}
+			break;
+		default:
+			return -1;
+		}
+	}
+}
+
+static int encode_txt(char *buf, const char *txt) {
+	int off = 0;
+	for (;;) {
+		size_t keysz = strlen(txt);
+		if (!keysz) {
+			return off;
+		}
+
+		if (off + 1 + keysz > EMDNS_MAX_TXT_SIZE || keysz > 256) {
+			return -1;
+		}
+
+		buf[off] = (uint8_t) keysz;
+		memcpy(buf+off+1, txt, keysz);
+
+		off += 1 + keysz;
+		txt += keysz + 1;
+	}
+}
+
+static int decode_txt(char *buf, const uint8_t *txt, size_t len) {
+	int off = 0;
+	const uint8_t *end = txt + len;
+	while (txt < end) {
+		uint8_t keysz = *txt;
+		if (off + keysz + 1 > EMDNS_MAX_TXT_SIZE || txt + 1 + keysz > end) {
+			return -1;
+		}
+
+		memcpy(buf+off, txt + 1, keysz);
+		buf[off+keysz] = '\0';
+
+		off += keysz + 1;
+		txt += 1 + keysz;
+	}
+
+	return off;
+}
+
+int emdns_set_host(struct emdns *m, const char *name) {
+	int sz = encode_dns_name(m->host, name);
+	if (sz < 0) {
+		return EMDNS_MALFORMED;
+	}
+	m->hostsz = sz;
+	return 0;
+}
+
+int emdns_publish_ip6(struct emdns *m, const struct in6_addr *addr) {
+	struct emdns_publish *p = new_publish(m);
+	if (!p) {
+		return EMDNS_TOO_MANY;
+	}
+	p->next = m->publish_ips;
+	m->publish_ips = p;
+
+	p->next_announce = 0; // publish immediately
+	p->last_publish = 0;
+	p->wait_duration = 1000;
+	p->type = EMDNS_PUBLISH_AAAA;
+	memcpy(&p->data.ip6, addr, sizeof(*addr));
+
+	heap_insert(&m->publish_heap, &p->hn, &compare_publish);
+
+	return (int) (p - m->publishv);
+}
+
+int emdns_publish_service(struct emdns *m, const char *svc, const char *txt, uint16_t port) {
+	struct emdns_publish *p = new_publish(m);
+	if (!p) {
+		return EMDNS_TOO_MANY;
+	}
+
+	int txtsz = encode_txt(p->data.svc.txt, txt);
+	if (txtsz < 0) {
+		return EMDNS_MALFORMED;
+	}
+
+	int namesz = encode_dns_name(p->data.svc.name, svc);
+	if (namesz <= 0) {
+		free_publish(m, p);
+		return EMDNS_MALFORMED;
+	}
+
+	p->next_announce = 0; // publish immediately
+	p->last_publish = 0;
+	p->wait_duration = 1000;
+	p->type = EMDNS_PUBLISH_SERVICE;
+	p->data.svc.port = port;
+	p->data.svc.namesz = namesz;
+	p->data.svc.txtsz = txtsz;
+
+	heap_insert(&m->publish_heap, &p->hn, &compare_publish);
+
+	return (int) (p - m->publishv);
+}
+
+static int encode_service(struct emdns *m, struct emdns_publish *r, uint8_t *u, int *poff, int sz) {
+	// SRV
+	int reqsz = r->data.svc.namesz + 2 /*type*/ + 2 /*class*/ + 4 /*ttl*/ + 2 /*datasz*/ + 2 /*pri*/ + 2 /*weight*/ + 2 /*port*/ + m->hostsz;
+	// TXT
+	reqsz += 3 /*name*/ + 2 /*type*/ + 2 /*class*/ + 4 /*ttl*/ + 2 /*datasz*/ + r->data.svc.txtsz;
+	// PTR
+	reqsz += 3 /*name*/ + 2 /*type*/ + 2 /*class*/ + 4 /*ttl*/ + 2 /*datasz*/ + 3 /*srv name*/;
+
+	if (*poff + reqsz > sz) {
+		return -1;
+	}
+
+	// SRV
+	uint8_t *p = u + *poff;
+	uint16_t nameoff = (uint16_t) *poff;
+	uint16_t svcoff = nameoff + r->data.svc.name[0] + 1;
+	memcpy(p, r->data.svc.name, r->data.svc.namesz);
+	p += r->data.svc.namesz;
+	put_big_16(p, RTYPE_SRV);
+	put_big_16(p + 2, RCLASS_IN);
+	put_big_32(p + 4, TTL_DEFAULT);
+	put_big_16(p + 8, 2 + 2 + 2 + m->hostsz);
+	put_big_16(p + 10, PRIORITY_DEFAULT);
+	put_big_16(p + 12, WEIGHT_DEFAULT);
+	put_big_16(p + 14, r->data.svc.port);
+	p += 16;
+	uint16_t hostoff = (uint16_t) (p - u);
+	memcpy(p, m->host, m->hostsz);
+	p += m->hostsz;
+
+	// TXT
+	*(p++) = LABEL_PTR;
+	put_big_16(p, nameoff);
+	put_big_16(p + 2, RTYPE_TXT);
+	put_big_16(p + 4, RCLASS_IN);
+	put_big_32(p + 6, TTL_DEFAULT);
+	put_big_16(p + 10, r->data.svc.txtsz);
+	p += 12;
+	memcpy(p, r->data.svc.txt, r->data.svc.txtsz);
+	p += r->data.svc.txtsz;
+
+	// PTR
+	*(p++) = LABEL_PTR;
+	put_big_16(p, svcoff);
+	put_big_16(p + 2, RTYPE_PTR);
+	put_big_16(p + 4, RCLASS_IN);
+	put_big_32(p + 6, TTL_DEFAULT);
+	put_big_16(p + 10, 3); /*datasz*/
+	p[12] = LABEL_PTR;
+	put_big_16(p + 13, nameoff);
+	p += 15;
+
+	*poff = (int) (p - u);
+	return 0;
+}
+
+static int encode_ip6(struct emdns *m, struct emdns_publish *r, uint8_t *u, int *poff, int sz) {
+	int reqsz = m->hostsz + 2 /*type*/ + 2 /*class*/ + 4 /*ttl*/ + 2 /*datasz*/ + 16 /*ip*/;
+
+	if (*poff + reqsz > sz) {
+		return -1;
+	}
+
+	uint8_t *p = u + *poff;
+	memcpy(p, m->host, m->hostsz);
+	p += m->hostsz;
+	put_big_16(p, RTYPE_AAAA);
+	put_big_16(p + 2, RCLASS_IN);
+	put_big_32(p + 4, TTL_DEFAULT);
+	put_big_16(p + 8, 16); // datasz
+	p += 10;
+	memcpy(p, &r->data.ip6, sizeof(r->data.ip6));
+	p += sizeof(r->data.ip6);
+
+	*poff = (int) (p - u);
+	return 0;
+}
+
+static void update_publish_time(struct emdns *m, struct emdns_publish *r, emdns_time now) {
+	heap_remove(&m->publish_heap, &r->hn, &compare_publish);
+	r->next_announce = now + r->wait_duration;
+	if (r->wait_duration < 60 * 60 * 1000) {
+		r->wait_duration *= 2;
+	}
+	r->last_publish = now;
+	heap_insert(&m->publish_heap, &r->hn, &compare_publish);
+}
+
+static void update_request_time(struct emdns *m, struct emdns_request *r, emdns_time now) {
+	heap_remove(&m->request_heap, &r->hn, &compare_request);
+	r->next_request = now + r->wait_duration;
+	if (r->wait_duration < 60 * 60 * 1000) {
+		r->wait_duration *= 2;
+	}
+	heap_insert(&m->request_heap, &r->hn, &compare_request);
+}
+
+int emdns_next(struct emdns *m, emdns_time *time, void *buf, int sz) {
+	assert(sz >= MIN_MESSAGE_SIZE);
+	uint8_t *u = (uint8_t*) buf;
+	uint16_t num_questions = 0;
+	uint16_t num_publish = 0;
+	bool do_publish = false;
+	emdns_time next_publish = INT64_MAX;
+	emdns_time next_request = INT64_MAX;
+
+	int off = 12;
+
+	for (;;) {
+		struct heap_node *hn = heap_min(&m->publish_heap);
+		if (!hn) {
+			break;
+		}
+
+		struct emdns_publish *r = container_of(hn, struct emdns_publish, hn);
+		if (r->next_announce > *time) {
+			next_publish = r->next_announce;
+			break;
+		}
+
+		if (r->type == EMDNS_PUBLISH_SERVICE) {
+			if (encode_service(m, r, u, &off, sz)) {
+				break;
+			}
+			num_publish++;
+		}
+
+		update_publish_time(m, r, *time);
+		do_publish = true;
+	}
+
+	assert(off <= sz);
+
+	if (do_publish) {
+		for (struct emdns_publish *r = m->publish_ips; r != NULL; r = r->next) {
+			if (encode_ip6(m, r, u, &off, sz)) {
+				break;
+			}
+			update_publish_time(m, r, *time);
+			num_publish++;
+		}
+
+		put_big_16(u, 0); // transaction ID
+		put_big_16(u + 2, FLAG_RESPONSE); // flags
+		put_big_16(u + 4, 0); // questions
+		put_big_16(u + 6, num_publish); // answers
+		put_big_16(u + 8, 0); // authority
+		put_big_16(u + 10, 0); // additional
+
+		return off;
+	}
+
+	for (;;) {
+		struct heap_node *hn = heap_min(&m->request_heap);
+		if (!hn) {
+			break;
+		}
+
+		struct emdns_request *r = container_of(hn, struct emdns_request, hn);
+		if (r->next_request > *time) {
+			next_request = r->next_request;
+			break;
+		}
+
+		int reqsz = r->namesz + 4;
+		if (r->type == EMDNS_QUERY_TXT_SRV) {
+			reqsz += 6;
+		}
+
+		if (off + reqsz > sz) {
+			// too many questions. we'll ask more in the next message
+			break;
+		}
+
+		uint8_t *p = u + off;
+		memcpy(p, r->name, r->namesz);
+		p += r->namesz;
+
+		switch (r->type) {
+		case EMDNS_QUERY_AAAA:
+			put_big_16(p, RTYPE_AAAA);
+			put_big_16(p + 2, RCLASS_IN);
+			p += 4;
+			break;
+		case EMDNS_QUERY_TXT_SRV:
+			// this is actually two questions using the same name
+			num_questions++;
+			put_big_16(p, RTYPE_TXT);
+			put_big_16(p + 2, RCLASS_IN);
+			put_big_16(p + 4, LABEL_PTR | off);
+			put_big_16(p + 6, RTYPE_SRV);
+			put_big_16(p + 8, RCLASS_IN);
+			p += 10;
+			break;
+		case EMDNS_SCAN_PTR:
+			put_big_16(p, RTYPE_PTR);
+			put_big_16(p + 2, RCLASS_IN);
+			p += 4;
+			break;
+		}
+
+		off = (int) (p - u);
+		update_request_time(m, r, *time);
+		num_questions++;
+	}
+
+	assert(off <= sz);
+
+	if (num_questions) {
+		put_big_16(u, 0); // transaction ID
+		put_big_16(u+2, 0); // flags
+		put_big_16(u+4, num_questions);
+		put_big_16(u+6, 0); // answers
+		put_big_16(u+8, 0); // authority
+		put_big_16(u+10, 0); // additional
+
+		return off;
+	}
+
+	*time = next_request < next_publish ? next_request : next_publish;
+	return EMDNS_PENDING;
+}
+
+static void reschedule_publish(struct emdns *m, struct emdns_publish *r, emdns_time time) {
+	heap_remove(&m->publish_heap, &r->hn, &compare_publish);
+	r->next_announce = time;
+	heap_insert(&m->publish_heap, &r->hn, &compare_publish);
+}
+
+static struct emdns_answer *find_answer(struct emdns_request *r, const uint8_t *label, uint8_t labelsz) {
+	for (struct emdns_answer *a = r->answers; a != NULL; a = a->next) {
+		if (a->labelsz == labelsz && !memcmp(a->label, label, labelsz)) {
+			return a;
+		}
+	}
+	return NULL;
+}
+
+static struct emdns_answer *create_answer(struct emdns *m, struct emdns_request *r, const uint8_t *label, uint8_t labelsz) {
+	struct emdns_answer *a = find_answer(r, label, labelsz);
+	if (a) {
+		return a;
+	}
+
+	a = new_answer(m);
+	if (!a) {
+		return NULL;
+	}
+
+	a->subrequest = NULL;
+	a->owner = r;
+	a->have_txt = 0;
+	a->have_srv = 0;
+	a->have_aaaa = 0;
+	a->hostsz = 0;
+	a->txtsz = 0;
+	a->labelsz = labelsz;
+	memcpy(a->label, label, labelsz);
+	a->label[labelsz] = '\0';
+
+	a->next = r->answers;
+	r->answers = a;
+
+	return a;
+}
+
+static void publish_answer(struct emdns_answer *a) {
+	if (a->have_txt && a->have_srv && a->have_aaaa) {
+		a->owner->add(a->owner->udata, (char*) a->label, &a->sa, (char*) a->txt, a->txtsz);
+	}
+}
+
+int emdns_process(struct emdns *m, emdns_time now, const void *msg, int sz) {
+	if (sz < 12) {
+		return EMDNS_MALFORMED;
+	}
+	uint8_t *u = (uint8_t*) msg;
+	uint16_t flags = big_16(u+2);
+	uint16_t question_num = big_16(u+4);
+	uint16_t answer_num = big_16(u+6);
+	uint16_t auth_num = big_16(u+8);
+	uint16_t additional_num = big_16(u+10);
+	uint16_t off = 12;
+
+	// process answers and additionals in the same loop
+	answer_num += additional_num;
+	if (auth_num) {
+		return EMDNS_MALFORMED;
+	}
+
+	while (question_num--) {
+		uint8_t name[256];
+		int namesz = decode_dns_name(name, u, sz, &off);
+		if (namesz < 0 || off + 4 > sz) {
+			return EMDNS_MALFORMED;
+		}
+
+		uint16_t rtype = big_16(u+off);
+		uint16_t rclass = big_16(u+off+2);
+		off += 4;
+
+		// per the rfc only questions in request messages should be processed
+		if ((flags & FLAG_RESPONSE) != 0 && rclass != RCLASS_IN) {
+			continue;
+		}
+
+		switch (rtype) {
+		case RTYPE_AAAA:
+			if (off + m->hostsz > sz || memcmp(u + off, m->host, m->hostsz)) {
+				continue;
+			}
+
+			// see if any of the AAAA records need to go out
+			// note that we always send all if we send any, so just need to find the first one
+			for (struct emdns_publish *r = m->publish_ips; r != NULL; r = r->next) {
+				if (now - r->last_publish > 1000) {
+					reschedule_publish(m, r, now);
+					break;
+				}
+			}
+			break;
+
+		case RTYPE_SRV:
+		case RTYPE_TXT:
+			for (int i = 0; i < m->publish_used; i++) {
+				struct emdns_publish *r = &m->publishv[i];
+				if (r->type == EMDNS_PUBLISH_SERVICE
+					&& now - r->last_publish > 1000
+					&& off + r->data.svc.namesz <= sz
+					&& !memcmp(u + off, r->data.svc.name, r->data.svc.namesz)) {
+					reschedule_publish(m, r, now);
+				}
+			}
+			break;
+		case RTYPE_PTR:
+			for (int i = 0; i < m->publish_used; i++) {
+				struct emdns_publish *r = &m->publishv[i];
+				int svcoff = r->data.svc.name[0] + 1;
+				int svcsz = r->data.svc.namesz - svcoff;
+				uint8_t *svc = r->data.svc.name + svcoff;
+
+				if (r->type == EMDNS_PUBLISH_SERVICE
+					&& now - r->last_publish > 1000
+					&& off + svcsz <= sz
+					&& !memcmp(u + off, svc, svcsz)) {
+					reschedule_publish(m, r, now);
+				}
+			}
 			break;
 		}
 	}
 
-	if (id == EMDNS_MAX_REQUESTS) {
-		return MDNS_TOO_MANY;
+	while (answer_num--) {
+		uint8_t name[256];
+		int namesz = decode_dns_name(name, u, sz, &off);
+		if (namesz < 0 || off + 10 > sz) {
+			return EMDNS_MALFORMED;
+		}
+
+		uint16_t rtype = big_16(u+off);
+		uint16_t rclass = big_16(u+off+2);
+		uint32_t ttl = big_32(u+off+4);
+		uint16_t datasz = big_16(u+off+8);
+		uint8_t *data = u + off + 10;
+		uint16_t dataoff = off + 10;
+		off += 10 + datasz;
+
+		if (off + datasz > sz) {
+			return EMDNS_MALFORMED;
+		}
+
+		if (rclass != RCLASS_IN) {
+			continue;
+		}
+
+		if ((flags & FLAG_RESPONSE) == 0 && rtype == RTYPE_PTR) {
+			// we have a known address field
+			// check to see if it's ours and remove the publish
+			// TODO
+		}
+
+
+		switch (rtype) {
+		case RTYPE_PTR:
+		{
+			uint8_t svchost[256];
+			int svchsz = decode_dns_name(svchost, msg, sz, &dataoff);
+			uint8_t labelsz = svchost[0];
+
+			if (namesz < 0 || dataoff != off || labelsz + 1 >= namesz) {
+				break;
+			}
+
+			for (int id = 0; id < m->requests_used; id++) {
+				struct emdns_request *r = &m->requestv[id];
+				if (r->type != EMDNS_SCAN_PTR
+					|| namesz != r->namesz
+					|| memcmp(name, r->name, namesz)) {
+					continue;
+				}
+
+				struct emdns_answer *a = create_answer(m, r, svchost + 1, labelsz);
+				if (!a) {
+					break;
+				}
+
+				a->expiry = now + ttl;
+				break;
+			}
+		}
+		break;
+		case RTYPE_TXT:
+		case RTYPE_SRV:
+		{
+			uint8_t labelsz = name[0];
+			if (labelsz + 1 >= namesz) {
+				break;
+			}
+
+			uint8_t *svc = name + 1 + labelsz;
+			int svcsz = namesz - labelsz;
+
+			for (int id = 0; id < m->requests_used; id++) {
+				struct emdns_request *r = &m->requestv[id];
+				if (r->type != EMDNS_SCAN_PTR
+					|| svcsz != r->namesz
+					|| memcmp(svc, r->name, svcsz)) {
+					continue;
+				}
+
+				struct emdns_answer *a = find_answer(r, name + 1, labelsz);
+				if (!a) {
+					break;
+				}
+
+				if (rtype == RTYPE_TXT) {
+					int txtsz = decode_txt(a->txt, data, datasz);
+					if (txtsz < 0) {
+						break;
+					}
+
+					a->txtsz = (uint16_t) txtsz;
+					a->have_txt = 1;
+				} else {
+					// srv
+					if (datasz < 7) {
+						break;
+					}
+
+					uint16_t priority = big_16(data);
+					uint16_t weight = big_16(data + 2);
+					uint16_t port = big_16(data + 4);
+
+					dataoff += 6;
+					int hostsz = decode_dns_name(a->host, msg, sz, &dataoff);
+					if (hostsz < 0 || dataoff != off) {
+						break;
+					}
+
+					(void) priority;
+					(void) weight;
+					a->sa.sin6_port = ntohs(port);
+					a->have_srv = 1;
+				}
+
+				publish_answer(a);
+				break;
+			}
+		}
+		break;
+		case RTYPE_AAAA:
+			if (datasz != 16) {
+				break;
+			}
+
+			for (int id = 0; id < m->answers_used; id++) {
+				struct emdns_answer *a = &m->answerv[id];
+				if (!a->have_srv || a->hostsz != namesz || memcmp(a->host, name, namesz)) {
+					continue;
+				}
+
+				memcpy(&a->sa.sin6_addr, data, 16);
+				a->have_aaaa = 1;
+				publish_answer(a);
+			}
+			break;
+		}
 	}
 
-	struct mdns_request *r = &m->requestv[id];
-	int sz = copy_to_dns_name(r->name, name);
-	if (sz < 0) {
-		return MDNS_MALFORMED;
-	}
-
-	r->valid = 1;
-	r->query = 0;
-	r->udata = udata;
-	r->add = add;
-	r->remove = remove;
-	r->namesz = (uint8_t) sz;
-	r->type = type;
-	m->request_num++;
-	return id;
+	return 0;
 }
-#endif
 
 int emdns_query_aaaa(struct emdns *m, const char *name, void *udata, emdns_addcb cb) {
 	struct emdns_request *r = new_request(m);
@@ -383,7 +821,7 @@ int emdns_query_aaaa(struct emdns *m, const char *name, void *udata, emdns_addcb
 		return EMDNS_TOO_MANY;
 	}
 
-	int sz = copy_to_dns_name(r->name, name);
+	int sz = encode_dns_name(r->name, name);
 	if (sz < 0) {
 		free_request(m, r);
 		return EMDNS_MALFORMED;
@@ -393,9 +831,36 @@ int emdns_query_aaaa(struct emdns *m, const char *name, void *udata, emdns_addcb
 	r->add = cb;
 	r->remove = NULL;
 	r->udata = udata;
-	r->namesz = sz;
+	r->namesz = (uint8_t) sz;
 	r->next_request = 0; // forces an immediate send
-	r->duration = 1000;
+	r->wait_duration = 1000;
+
+	heap_insert(&m->request_heap, &r->hn, &compare_request);
+
+	return (int) (r - m->requestv);
+}
+
+int emdns_scan(struct emdns *m, const char *name, void *udata, emdns_addcb add, emdns_rmcb remove) {
+	struct emdns_request *r = new_request(m);
+	if (r == NULL) {
+		return EMDNS_TOO_MANY;
+	}
+
+	int sz = encode_dns_name(r->name, name);
+	if (sz < 0) {
+		free_request(m, r);
+		return EMDNS_MALFORMED;
+	}
+
+	assert(r->answers == NULL);
+
+	r->type = EMDNS_SCAN_PTR;
+	r->add = add;
+	r->remove = remove;
+	r->udata = udata;
+	r->namesz = (uint8_t) sz;
+	r->next_request = 0; // force an immediate send
+	r->wait_duration = 1000;
 
 	heap_insert(&m->request_heap, &r->hn, &compare_request);
 
