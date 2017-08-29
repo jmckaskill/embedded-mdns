@@ -38,15 +38,12 @@ int emdns_next(struct emdns *m, emdns_time *time, void *buf, int sz);
 // emdns_process processes a received multicast message
 // this may generate messages to be sent which should be retrieved with emdns_next
 // time is the current time using the same monontonic clock as emdns_next
-int emdns_process(struct emdns *m, emdns_time time, const struct sockaddr *sa, int sasz, const void *msg, int sz);
+int emdns_process(struct emdns *m, emdns_time time, const void *msg, int sz);
 
-// emdns_publish starts publishing the requested record
-// buf is the buffer containing the raw record
-// for AAAA records this holds the IP address as a string
-// for SRV records
-// the record will be continually published until stopped using emdns_stop
-// returns a reference to use with emdns_stop
-int emdns_publish(struct emdns *m, const struct emdns_record *rec);
+int emdns_set_host(struct emdns *m, const char *name);
+
+int emdns_publish_ip6(struct emdns *m, const struct in6_addr *addr);
+int emdns_publish_service(struct emdns *m, const char *svc, const char *label, const char *txt, uint16_t port);
 
 // emdns_cb is the callback type used by emdns_scan and emdns_query
 // the provided record uses temporary memory
@@ -66,7 +63,7 @@ typedef void (*emdns_rmcb)(void *udata, const char *name);
 // possible errors include:
 // MDNS_TOO_MANY - too many concurrent requests
 // MDNS_MALFORMED - malformed request record
-int emdns_query_aaaa(struct emdns *m, const char *name, void *udata, emdns_addcb cb);
+int emdns_query_ip6(struct emdns *m, const char *name, void *udata, emdns_addcb cb);
 
 // emdns_scan starts a continuous scan
 // add will be called as results are found
@@ -128,11 +125,18 @@ struct emdns_publish {
     struct heap_node hn;
 	struct emdns_publish *next;
 	emdns_time next_announce;
-	emdns_time last_publish;
-	uint8_t rtype;
-    uint8_t namesz, datasz;
+    emdns_time last_publish;
+    unsigned is_service : 1;
+    union {
+        struct in6_addr ip6;
+        struct {
+            uint16_t port;
+            const char *txt;
+            uint8_t svcoff;
+        } svc;
+    } data;
+    uint8_t namesz;
     uint8_t name[256];
-    uint8_t data[256];
 };
 
 struct emdns {

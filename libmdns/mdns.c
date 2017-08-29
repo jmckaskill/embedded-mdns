@@ -13,11 +13,25 @@
 #define RTYPE_TXT 16
 #define RTYPE_PTR 12
 #define RTYPE_NSEC 47
-#define COMPRESSED_NAME_FLAG 0xC0
+#define LABEL_MASK 0xC0
+#define LABEL_NORMAL 0x00
+#define LABEL_PTR 0xC0
+#define FLAG_RESPONSE 0x80
 
 static void put_big_16(uint8_t *u, uint16_t v) {
 	u[0] = (uint8_t) (v >> 8);
 	u[1] = (uint8_t) v;
+}
+
+static uint16_t big_16(uint8_t *u) {
+	return ((uint16_t) u[0] << 8) | ((uint16_t) u[1]);
+}
+
+static uint32_t big_32(uint8_t *u) {
+	return ((uint32_t) u[0] << 24)
+		|  ((uint32_t) u[1] << 16)
+		|  ((uint32_t) u[2] << 8)
+		|  ((uint32_t) u[3]);
 }
 
 static int compare_publish(const struct heap_node *a, const struct heap_node *b) {
@@ -173,6 +187,127 @@ int emdns_next(struct emdns *m, emdns_time *time, void *buf, int sz) {
 	}
 
 	return EMDNS_PENDING;
+}
+
+#define MAX_LABEL_REDIRECTS 5
+
+// buf must be 256 bytes long to allow for the trailing 0 length label
+static int decode_dns_name(uint8_t *buf, const uint8_t* *msg, int sz, int *poff) {
+	int redirects = 0;
+	int w = 0;
+	int off = *poff;
+
+	for (;;) {
+		if (off >= sz) {
+			return -1;
+		}
+		
+		int type = msg[off] & LABEL_MASK;
+
+		switch (type) {
+		case LABEL_PTR: {
+				if (off + 3 > sz || ++redirects >= MAX_LABEL_REDIRECTS) {
+					return -1;
+				}
+				off = (int) big_16(off+1);
+				redirects++;
+				if (poff) {
+					*poff += 3;
+					poff = NULL;
+				}
+			}
+			break;
+		case LABEL_NORMAL: {
+				int labelsz = msg[off];
+
+				if (labelsz == 0) {
+					buf[w++] = 0;
+					if (poff) {
+						(*poff)++;
+					}
+					return w;
+				}
+
+				if (off + 1 + labelsz > sz || w + 1 + labelsz > 255) {
+					return -1;
+				}
+
+				memcpy(buf+w, msg+off, 1+labelsz);
+				off += 1 + labelsz;
+				w += 1 + labelsz;
+
+				if (poff) {
+					*poff = off;
+				}
+			}
+			break;
+		default:
+			return -1;
+		}
+	}
+}
+
+int emdns_process(struct emdns *m, emdns_time time, const void *msg, int sz) {
+	if (sz < 12) {
+		return EMDNS_MALFORMED;
+	}
+	uint8_t *u = (uint8_t*) msg;
+	uint16_t flags = big_16(u+2);
+	uint16_t question_num = big_16(u+4);
+	uint16_t answer_num = big_16(u+6);
+	uint16_t auth_num = big_16(u+8);
+	uint16_t additional_num = big_16(u+10);
+	int off = 12;
+
+	while (question_num--) {
+		uint8_t name[256];
+		int namesz = decode_dns_name(name, u, sz, &off);
+		if (namesz < 0 || off + 4 > sz) {
+			return EMDNS_MALFORMED;
+		}
+
+		uint16_t rtype = big_16(u+off);
+		uint16_t rclass = big_16(u+off+2);
+		off += 4;
+
+		// per the rfc only questions in request messages should be processed
+		if ((flags & FLAG_RESPONSE) == 0 && rclass == RCLASS_IN && rtype) {
+			for (int i = 0; i < m->publish_used; i++) {
+				struct mdns_publish *p = &m->publishv[i];
+				// p->rtype == 0 for a no longer used publish
+				// we've already checked that rtype != 0 above
+				// per the mdns rfc don't publish more than once a second
+				if (p->rtype == rtype && time - p->last_publish > 1000) {
+					heap_remove(&m->publish_heap, &p->hn, &compare_publish);
+					m->next_announce = time;
+					heap_insert(&m->publish_heap, &p->hn, &compare_publish);
+				}
+			}
+		}
+	}
+
+	while (answer_num--) {
+		uint8_t name[256];
+		int namesz = decode_dns_name(name, u, sz, &off);
+		if (namesz < 0 || off + 10 > sz) {
+			return EMDNS_MALFORMED;
+		}
+
+		uint16_t rtype = big_16(u+off);
+		uint16_t rclass = big_16(u+off+2);
+		uint32_t ttl = big_32(u+off+4);
+		uint16_t datasz = big_16(u+off+8);
+		off += 10;
+
+		if (off + datasz > sz) {
+			return EMDNS_MALFORMED;
+		}
+
+		if ((flags & FLAG_RESPONSE) == 0) && rclass == RCLASS_IN && rtype == RTYPE_PTR) {
+			// we have a known address field
+			// check to see if it's ours and remove the publish
+		}
+	}
 }
 
 // copies a dot separated string into dns form
