@@ -2,6 +2,12 @@
 #include <assert.h>
 #include <string.h>
 #include <stdbool.h>
+#include <math.h>
+
+#ifdef _WIN32
+#pragma comment(lib, "ws2_32.lib")
+// for htons
+#endif
 
 #ifndef container_of
 #define container_of(ptr, type, member) ((type*) ((char*) (ptr) - offsetof(type, member)))
@@ -10,6 +16,7 @@
 #define MIN_MESSAGE_SIZE 512
 
 #define RCLASS_IN 1
+#define RCLASS_IN_FLUSH 0x8001
 
 #define RTYPE_AAAA 28
 #define RTYPE_SRV 33
@@ -21,7 +28,8 @@
 #define LABEL_NORMAL 0x00
 #define LABEL_PTR 0xC0
 
-#define FLAG_RESPONSE 0x80
+#define FLAG_RESPONSE 0x8000
+#define FLAG_AUTHORITY 0x0400
 
 #define TTL_DEFAULT 120
 #define PRIORITY_DEFAULT 0
@@ -48,6 +56,10 @@ static uint32_t big_32(uint8_t *u) {
 		|  ((uint32_t) u[1] << 16)
 		|  ((uint32_t) u[2] << 8)
 		|  ((uint32_t) u[3]);
+}
+
+static int random_wait(int minms, int maxms) {
+	return minms + (rand() % (maxms - minms));
 }
 
 static int compare_publish(const struct heap_node *a, const struct heap_node *b) {
@@ -274,7 +286,7 @@ int emdns_set_host(struct emdns *m, const char *name) {
 	return 0;
 }
 
-int emdns_publish_ip6(struct emdns *m, const struct in6_addr *addr) {
+int emdns_publish_ip6(struct emdns *m, emdns_time now, const struct in6_addr *addr) {
 	struct emdns_publish *p = new_publish(m);
 	if (!p) {
 		return EMDNS_TOO_MANY;
@@ -282,7 +294,7 @@ int emdns_publish_ip6(struct emdns *m, const struct in6_addr *addr) {
 	p->next = m->publish_ips;
 	m->publish_ips = p;
 
-	p->next_announce = 0; // publish immediately
+	p->next_announce = now + random_wait(1, 250);
 	p->last_publish = 0;
 	p->wait_duration = 1000;
 	p->type = EMDNS_PUBLISH_AAAA;
@@ -293,7 +305,7 @@ int emdns_publish_ip6(struct emdns *m, const struct in6_addr *addr) {
 	return (int) (p - m->publishv);
 }
 
-int emdns_publish_service(struct emdns *m, const char *svc, const char *txt, uint16_t port) {
+int emdns_publish_service(struct emdns *m, emdns_time now, const char *svc, const char *txt, uint16_t port) {
 	struct emdns_publish *p = new_publish(m);
 	if (!p) {
 		return EMDNS_TOO_MANY;
@@ -310,7 +322,7 @@ int emdns_publish_service(struct emdns *m, const char *svc, const char *txt, uin
 		return EMDNS_MALFORMED;
 	}
 
-	p->next_announce = 0; // publish immediately
+	p->next_announce = now + random_wait(1, 250);
 	p->last_publish = 0;
 	p->wait_duration = 1000;
 	p->type = EMDNS_PUBLISH_SERVICE;
@@ -342,7 +354,7 @@ static int encode_service(struct emdns *m, struct emdns_publish *r, uint8_t *u, 
 	memcpy(p, r->data.svc.name, r->data.svc.namesz);
 	p += r->data.svc.namesz;
 	put_big_16(p, RTYPE_SRV);
-	put_big_16(p + 2, RCLASS_IN);
+	put_big_16(p + 2, RCLASS_IN_FLUSH);
 	put_big_32(p + 4, TTL_DEFAULT);
 	put_big_16(p + 8, 2 + 2 + 2 + m->hostsz);
 	put_big_16(p + 10, PRIORITY_DEFAULT);
@@ -357,7 +369,7 @@ static int encode_service(struct emdns *m, struct emdns_publish *r, uint8_t *u, 
 	*(p++) = LABEL_PTR;
 	put_big_16(p, nameoff);
 	put_big_16(p + 2, RTYPE_TXT);
-	put_big_16(p + 4, RCLASS_IN);
+	put_big_16(p + 4, RCLASS_IN_FLUSH);
 	put_big_32(p + 6, TTL_DEFAULT);
 	put_big_16(p + 10, r->data.svc.txtsz);
 	p += 12;
@@ -390,7 +402,7 @@ static int encode_ip6(struct emdns *m, struct emdns_publish *r, uint8_t *u, int 
 	memcpy(p, m->host, m->hostsz);
 	p += m->hostsz;
 	put_big_16(p, RTYPE_AAAA);
-	put_big_16(p + 2, RCLASS_IN);
+	put_big_16(p + 2, RCLASS_IN_FLUSH);
 	put_big_32(p + 4, TTL_DEFAULT);
 	put_big_16(p + 8, 16); // datasz
 	p += 10;
@@ -403,20 +415,22 @@ static int encode_ip6(struct emdns *m, struct emdns_publish *r, uint8_t *u, int 
 
 static void update_publish_time(struct emdns *m, struct emdns_publish *r, emdns_time now) {
 	heap_remove(&m->publish_heap, &r->hn, &compare_publish);
-	r->next_announce = now + r->wait_duration;
-	if (r->wait_duration < 60 * 60 * 1000) {
-		r->wait_duration *= 2;
-	}
 	r->last_publish = now;
+	if (r->wait_duration < 8000) {
+		r->next_announce = now + r->wait_duration;
+		r->wait_duration *= 2;
+	} else {
+		r->next_announce = INT64_MAX;
+	}
 	heap_insert(&m->publish_heap, &r->hn, &compare_publish);
 }
 
 static void update_request_time(struct emdns *m, struct emdns_request *r, emdns_time now) {
 	heap_remove(&m->request_heap, &r->hn, &compare_request);
-	r->next_request = now + r->wait_duration;
 	if (r->wait_duration < 60 * 60 * 1000) {
 		r->wait_duration *= 2;
 	}
+	r->next_request = now + r->wait_duration;
 	heap_insert(&m->request_heap, &r->hn, &compare_request);
 }
 
@@ -461,12 +475,14 @@ int emdns_next(struct emdns *m, emdns_time *time, void *buf, int sz) {
 			if (encode_ip6(m, r, u, &off, sz)) {
 				break;
 			}
-			update_publish_time(m, r, *time);
+			if (r->last_publish != *time) {
+				update_publish_time(m, r, *time);
+			}
 			num_publish++;
 		}
 
 		put_big_16(u, 0); // transaction ID
-		put_big_16(u + 2, FLAG_RESPONSE); // flags
+		put_big_16(u + 2, FLAG_RESPONSE | FLAG_AUTHORITY); // flags
 		put_big_16(u + 4, 0); // questions
 		put_big_16(u + 6, num_publish); // answers
 		put_big_16(u + 8, 0); // authority
@@ -631,14 +647,14 @@ int emdns_process(struct emdns *m, emdns_time now, const void *msg, int sz) {
 
 		switch (rtype) {
 		case RTYPE_AAAA:
-			if (off + m->hostsz > sz || memcmp(u + off, m->host, m->hostsz)) {
+			if (m->hostsz != namesz || memcmp(name, m->host, m->hostsz)) {
 				continue;
 			}
 
 			// see if any of the AAAA records need to go out
 			// note that we always send all if we send any, so just need to find the first one
 			for (struct emdns_publish *r = m->publish_ips; r != NULL; r = r->next) {
-				if (now - r->last_publish > 1000) {
+				if (now - r->last_publish >= 1000) {
 					reschedule_publish(m, r, now);
 					break;
 				}
@@ -784,7 +800,7 @@ int emdns_process(struct emdns *m, emdns_time now, const void *msg, int sz) {
 
 					(void) priority;
 					(void) weight;
-					a->sa.sin6_port = ntohs(port);
+					a->sa.sin6_port = htons(port);
 					a->have_srv = 1;
 				}
 
@@ -815,7 +831,7 @@ int emdns_process(struct emdns *m, emdns_time now, const void *msg, int sz) {
 	return 0;
 }
 
-int emdns_query_aaaa(struct emdns *m, const char *name, void *udata, emdns_addcb cb) {
+int emdns_query_aaaa(struct emdns *m, emdns_time now, const char *name, void *udata, emdns_addcb cb) {
 	struct emdns_request *r = new_request(m);
 	if (r == NULL) {
 		return EMDNS_TOO_MANY;
@@ -832,7 +848,7 @@ int emdns_query_aaaa(struct emdns *m, const char *name, void *udata, emdns_addcb
 	r->remove = NULL;
 	r->udata = udata;
 	r->namesz = (uint8_t) sz;
-	r->next_request = 0; // forces an immediate send
+	r->next_request = now;
 	r->wait_duration = 1000;
 
 	heap_insert(&m->request_heap, &r->hn, &compare_request);
@@ -840,7 +856,7 @@ int emdns_query_aaaa(struct emdns *m, const char *name, void *udata, emdns_addcb
 	return (int) (r - m->requestv);
 }
 
-int emdns_scan(struct emdns *m, const char *name, void *udata, emdns_addcb add, emdns_rmcb remove) {
+int emdns_scan(struct emdns *m, emdns_time now, const char *name, void *udata, emdns_addcb add, emdns_rmcb remove) {
 	struct emdns_request *r = new_request(m);
 	if (r == NULL) {
 		return EMDNS_TOO_MANY;
@@ -859,7 +875,7 @@ int emdns_scan(struct emdns *m, const char *name, void *udata, emdns_addcb add, 
 	r->remove = remove;
 	r->udata = udata;
 	r->namesz = (uint8_t) sz;
-	r->next_request = 0; // force an immediate send
+	r->next_request = now;
 	r->wait_duration = 1000;
 
 	heap_insert(&m->request_heap, &r->hn, &compare_request);

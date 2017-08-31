@@ -45,7 +45,7 @@ static DWORD WINAPI scan_thread(LPVOID param) {
 	WSAEventSelect(fd, ev, FD_READ);
 
 	struct emdns m = {0};
-	emdns_scan(&m, svc, NULL, &onadd, &onrm);
+	emdns_scan(&m, (emdns_time) GetTickCount64(), svc, NULL, &onadd, &onrm);
 
 	for (;;) {
 		char buf[1024];
@@ -55,7 +55,7 @@ static DWORD WINAPI scan_thread(LPVOID param) {
 			emdns_time next = now;
 			int w = emdns_next(&m, &next, buf, sizeof(buf));
 			if (w == EMDNS_PENDING) {
-				timeout = next - now;
+				timeout = (int) (next - now);
 				break;
 			}
 			send(fd, buf, w, 0);

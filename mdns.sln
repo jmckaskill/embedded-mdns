@@ -1,7 +1,7 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
-# Visual Studio 15
-VisualStudioVersion = 15.0.26403.7
+# Visual Studio 14
+VisualStudioVersion = 14.0.25123.0
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "mdns-win32-browser", "mdns-win32-browser\mdns-win32-browser.vcxproj", "{D1AA8FC7-6B46-4561-ADC5-0BE05CF8587A}"
 	ProjectSection(ProjectDependencies) = postProject
@@ -11,6 +11,8 @@ EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "libmdns", "libmdns\libmdns.vcxproj", "{1C539147-2494-4655-893B-656E365739BD}"
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "mdns-scan", "mdns-scan\mdns-scan.vcxproj", "{B65D190D-3F1C-459F-8600-38E431F539EF}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "emdns-test", "emdns-test\emdns-test.vcxproj", "{345894BA-F302-4793-A899-B24D776BB995}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -48,6 +50,14 @@ Global
 		{B65D190D-3F1C-459F-8600-38E431F539EF}.Release|x64.Build.0 = Release|x64
 		{B65D190D-3F1C-459F-8600-38E431F539EF}.Release|x86.ActiveCfg = Release|Win32
 		{B65D190D-3F1C-459F-8600-38E431F539EF}.Release|x86.Build.0 = Release|Win32
+		{345894BA-F302-4793-A899-B24D776BB995}.Debug|x64.ActiveCfg = Debug|x64
+		{345894BA-F302-4793-A899-B24D776BB995}.Debug|x64.Build.0 = Debug|x64
+		{345894BA-F302-4793-A899-B24D776BB995}.Debug|x86.ActiveCfg = Debug|Win32
+		{345894BA-F302-4793-A899-B24D776BB995}.Debug|x86.Build.0 = Debug|Win32
+		{345894BA-F302-4793-A899-B24D776BB995}.Release|x64.ActiveCfg = Release|x64
+		{345894BA-F302-4793-A899-B24D776BB995}.Release|x64.Build.0 = Release|x64
+		{345894BA-F302-4793-A899-B24D776BB995}.Release|x86.ActiveCfg = Release|Win32
+		{345894BA-F302-4793-A899-B24D776BB995}.Release|x86.Build.0 = Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

@@ -49,8 +49,8 @@ int emdns_next(struct emdns *m, emdns_time *time, void *buf, int sz);
 int emdns_process(struct emdns *m, emdns_time time, const void *msg, int sz);
 
 int emdns_set_host(struct emdns *m, const char *name);
-int emdns_publish_ip6(struct emdns *m, const struct in6_addr *addr);
-int emdns_publish_service(struct emdns *m, const char *svc, const char *txt, uint16_t port);
+int emdns_publish_ip6(struct emdns *m, emdns_time now, const struct in6_addr *addr);
+int emdns_publish_service(struct emdns *m, emdns_time now, const char *svc, const char *txt, uint16_t port);
 
 // emdns_cb is the callback type used by emdns_scan and emdns_query
 // the provided record uses temporary memory
@@ -70,7 +70,7 @@ typedef void (*emdns_rmcb)(void *udata, const char *name);
 // possible errors include:
 // MDNS_TOO_MANY - too many concurrent requests
 // MDNS_MALFORMED - malformed request record
-int emdns_query_ip6(struct emdns *m, const char *name, void *udata, emdns_addcb cb);
+int emdns_query_ip6(struct emdns *m, emdns_time now, const char *name, void *udata, emdns_addcb cb);
 
 // emdns_scan starts a continuous scan
 // add will be called as results are found
@@ -82,7 +82,7 @@ int emdns_query_ip6(struct emdns *m, const char *name, void *udata, emdns_addcb 
 // possible errors include:
 // MDNS_TOO_MANY - too many concurrent requests
 // MDNS_MALFORMED - malformed request record
-int emdns_scan(struct emdns *m, const char *name, void *udata, emdns_addcb add, emdns_rmcb remove);
+int emdns_scan(struct emdns *m, emdns_time now, const char *name, void *udata, emdns_addcb add, emdns_rmcb remove);
 
 // emdns_stop stops a pending scan, query or publish
 int emdns_stop(struct emdns *m, int ref);
