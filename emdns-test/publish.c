@@ -6,7 +6,7 @@ int test_publish_ip6() {
 	fprintf(stderr, "test_publish_ip6\n");
 
 	struct emdns m = {0};
-	emdns_set_host(&m, "test.local");
+	check(&err, emdns_set_host(&m, "test.local"), 0, "set host");
 
 	const char test_addr[16] = "\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10";
 	struct in6_addr a;
@@ -104,11 +104,12 @@ int test_publish_ip6() {
 		"\0\x01"; // internet class - QU not set
 
 	now = 20000;
-	check(&err, emdns_process(&m, now, request_msg, sizeof(request_msg) - 1), 0, "process uppercase request");
+	check(&err, emdns_process(&m, now, request_uppercase, sizeof(request_uppercase) - 1), 0, "process uppercase request");
 	now = 20500;
 	check(&err, emdns_next(&m, &now, buf, sizeof(buf)), sizeof(publish_msg) - 1, "uppercase response");
 
 	// check that we don't have any more sends planned
+	now = 20500;
 	check(&err, emdns_next(&m, &now, buf, sizeof(buf)), EMDNS_PENDING, "wait after response");
 	check(&err, now, INT64_MAX, "wait is infinite");
 

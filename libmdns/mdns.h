@@ -4,12 +4,12 @@
 #include <WinSock2.h>
 #include <WS2tcpip.h>
 #else
+#include <sys/socket.h>
+#include <netinet/in.h>
 #endif
 
 #include <stdint.h>
 #include "heap-inl.h"
-
-struct sockaddr;
 
 // maximum concurrent queries and scans
 #define EMDNS_MAX_REQUESTS 16
@@ -24,7 +24,7 @@ struct sockaddr;
 // main structure for the library
 // should be zero initialized
 // contains no dynamically allocated data so can be thrown away on cleanup
-struct mdns;
+struct emdns;
 
 // common monotonic clock in milliseconds
 typedef int64_t emdns_time;

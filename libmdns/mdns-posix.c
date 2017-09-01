@@ -1,10 +1,12 @@
 #include "mdns.h"
+
+#ifndef _WIN32
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <string.h>
 #include <unistd.h>
 
-int mdns_bind6(int interface_id) {
+int emdns_bind6(int interface_id) {
 	int fd = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
 	if (fd < 0) {
 		return -1;
@@ -53,3 +55,4 @@ err:
 	close(fd);
 	return -1;
 }
+#endif

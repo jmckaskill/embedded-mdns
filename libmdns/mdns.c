@@ -2,7 +2,8 @@
 #include <assert.h>
 #include <string.h>
 #include <stdbool.h>
-#include <math.h>
+#include <stdlib.h>
+#include <limits.h>
 
 #ifdef _WIN32
 #pragma comment(lib, "ws2_32.lib")
@@ -89,11 +90,13 @@ static struct emdns_answer *new_answer(struct emdns *m) {
 	return NULL;
 }
 
+#if 0
 static void free_answer(struct emdns *m, struct emdns_answer *a) {
 	assert(a->subrequest == NULL);
 	a->next = m->free_answer;
 	m->free_answer = a;
 }
+#endif
 
 static struct emdns_request *new_request(struct emdns *m) {
 	if (m->free_request) {
@@ -169,7 +172,11 @@ static int encode_dns_name(uint8_t *buf, const char *src) {
 		memcpy(buf + 1, src, len);
 
 		buf += 1 + len;
-		src += len + 1;
+		src += len;
+
+		if (*src == '.') {
+			src++;
+		}
 	}
 
 	// add the trailing root
@@ -203,7 +210,7 @@ static int decode_dns_name(uint8_t *buf, const void *msg, int sz, uint16_t *poff
 			if (off == sz || ++redirects >= MAX_LABEL_REDIRECTS) {
 				return -1;
 			}
-			off = (uint16_t) ((labelsz &~LABEL_MASK) << 8) | (uint16_t) u[off++];
+			off = (uint16_t) ((labelsz &~LABEL_MASK) << 8) | (uint16_t) u[off+1];
 			redirects++;
 			if (poff) {
 				*poff = off;
@@ -238,7 +245,26 @@ static int decode_dns_name(uint8_t *buf, const void *msg, int sz, uint16_t *poff
 	}
 }
 
-static int encode_txt(char *buf, const char *txt) {
+static int compare_dns_name(const uint8_t *a, const uint8_t *b) {
+	for (;;) {
+		uint8_t alen = *(a++);
+		uint8_t blen = *(b++);
+		if (alen != blen) {
+			return alen - blen;
+		}
+		if (!alen) {
+			return 0;
+		}
+		int diff = strncasecmp((char*) a, (char*) b, alen);
+		if (diff) {
+			return diff;
+		}
+		a += alen;
+		b += blen;
+	}
+}
+
+static int encode_txt(uint8_t *buf, const char *txt) {
 	int off = 0;
 	for (;;) {
 		size_t keysz = strlen(txt);
@@ -258,7 +284,7 @@ static int encode_txt(char *buf, const char *txt) {
 	}
 }
 
-static int decode_txt(char *buf, const uint8_t *txt, size_t len) {
+static int decode_txt(uint8_t *buf, const uint8_t *txt, size_t len) {
 	int off = 0;
 	const uint8_t *end = txt + len;
 	while (txt < end) {
@@ -361,7 +387,6 @@ static int encode_service(struct emdns *m, struct emdns_publish *r, uint8_t *u, 
 	put_big_16(p + 12, WEIGHT_DEFAULT);
 	put_big_16(p + 14, r->data.svc.port);
 	p += 16;
-	uint16_t hostoff = (uint16_t) (p - u);
 	memcpy(p, m->host, m->hostsz);
 	p += m->hostsz;
 
@@ -538,6 +563,9 @@ int emdns_next(struct emdns *m, emdns_time *time, void *buf, int sz) {
 			put_big_16(p + 2, RCLASS_IN);
 			p += 4;
 			break;
+		case EMDNS_NO_REQUEST:
+			assert(0);
+			break;
 		}
 
 		off = (int) (p - u);
@@ -629,6 +657,10 @@ int emdns_process(struct emdns *m, emdns_time now, const void *msg, int sz) {
 		return EMDNS_MALFORMED;
 	}
 
+	// use the send time for any responses from this incoming message
+	// that way they all go out in the same response
+	emdns_time sendtime = now + random_wait(20, 120);
+
 	while (question_num--) {
 		uint8_t name[256];
 		int namesz = decode_dns_name(name, u, sz, &off);
@@ -647,7 +679,7 @@ int emdns_process(struct emdns *m, emdns_time now, const void *msg, int sz) {
 
 		switch (rtype) {
 		case RTYPE_AAAA:
-			if (m->hostsz != namesz || memcmp(name, m->host, m->hostsz)) {
+			if (m->hostsz != namesz || compare_dns_name(name, m->host)) {
 				continue;
 			}
 
@@ -655,7 +687,7 @@ int emdns_process(struct emdns *m, emdns_time now, const void *msg, int sz) {
 			// note that we always send all if we send any, so just need to find the first one
 			for (struct emdns_publish *r = m->publish_ips; r != NULL; r = r->next) {
 				if (now - r->last_publish >= 1000) {
-					reschedule_publish(m, r, now);
+					reschedule_publish(m, r, sendtime);
 					break;
 				}
 			}
@@ -669,7 +701,7 @@ int emdns_process(struct emdns *m, emdns_time now, const void *msg, int sz) {
 					&& now - r->last_publish > 1000
 					&& off + r->data.svc.namesz <= sz
 					&& !memcmp(u + off, r->data.svc.name, r->data.svc.namesz)) {
-					reschedule_publish(m, r, now);
+					reschedule_publish(m, r, sendtime);
 				}
 			}
 			break;
@@ -684,7 +716,7 @@ int emdns_process(struct emdns *m, emdns_time now, const void *msg, int sz) {
 					&& now - r->last_publish > 1000
 					&& off + svcsz <= sz
 					&& !memcmp(u + off, svc, svcsz)) {
-					reschedule_publish(m, r, now);
+					reschedule_publish(m, r, sendtime);
 				}
 			}
 			break;
@@ -728,7 +760,7 @@ int emdns_process(struct emdns *m, emdns_time now, const void *msg, int sz) {
 			int svchsz = decode_dns_name(svchost, msg, sz, &dataoff);
 			uint8_t labelsz = svchost[0];
 
-			if (namesz < 0 || dataoff != off || labelsz + 1 >= namesz) {
+			if (svchsz < 0 || dataoff != off || labelsz + 1 >= svchsz) {
 				break;
 			}
 
