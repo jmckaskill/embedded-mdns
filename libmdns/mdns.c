@@ -640,7 +640,7 @@ static void reschedule_publish(struct emdns *m, struct emdns_publish *r, emdns_t
 	heap_insert(&m->publish_heap, &r->hn, &compare_publish);
 }
 
-static struct emdns_answer *find_answer(struct emdns_request *r, const uint8_t *label, uint8_t labelsz) {
+static struct emdns_answer *find_answer(struct emdns_request *r, const char *label, uint8_t labelsz) {
 	for (struct emdns_answer *a = r->answers; a != NULL; a = a->next) {
 		if (a->labelsz == labelsz && !strncasecmp(a->label, label, labelsz)) {
 			return a;
@@ -649,7 +649,7 @@ static struct emdns_answer *find_answer(struct emdns_request *r, const uint8_t *
 	return NULL;
 }
 
-static struct emdns_answer *create_answer(struct emdns *m, struct emdns_request *r, const uint8_t *label, uint8_t labelsz) {
+static struct emdns_answer *create_answer(struct emdns *m, struct emdns_request *r, const char *label, uint8_t labelsz) {
 	struct emdns_answer *a = find_answer(r, label, labelsz);
 	if (a) {
 		return a;
@@ -817,7 +817,7 @@ int emdns_process(struct emdns *m, emdns_time now, const void *msg, int sz) {
 						continue;
 					}
 
-					struct emdns_answer *a = create_answer(m, r, svchost + 1, labelsz);
+					struct emdns_answer *a = create_answer(m, r, (char*) svchost + 1, labelsz);
 					if (!a) {
 						break;
 					}
@@ -846,7 +846,7 @@ int emdns_process(struct emdns *m, emdns_time now, const void *msg, int sz) {
 						continue;
 					}
 
-					struct emdns_answer *a = find_answer(r, name + 1, labelsz);
+					struct emdns_answer *a = find_answer(r, (char*) name + 1, labelsz);
 					if (!a) {
 						break;
 					}

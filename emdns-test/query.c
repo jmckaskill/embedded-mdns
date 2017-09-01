@@ -5,7 +5,7 @@ static int err;
 static int callback_called;
 
 static void ip6_callback(void *udata, const struct in6_addr *addr) {
-	static const uint8_t expected_ip[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+	static const char expected_ip[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
 
 	check(&err, (intptr_t) udata, (intptr_t) &my_udata, "correct user data in callback");
 	check_data(&err, (char*) addr, expected_ip, 16, "check service ip address");

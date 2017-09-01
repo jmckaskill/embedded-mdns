@@ -114,7 +114,7 @@ struct emdns_answer {
 	uint16_t txtsz;
 	uint8_t labelsz;
 	uint8_t hostsz;
-	uint8_t label[64];
+	char label[64];
 	uint8_t txt[EMDNS_MAX_TXT_SIZE];
 	uint8_t host[256];
 };

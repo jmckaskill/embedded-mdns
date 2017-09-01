@@ -6,7 +6,7 @@ static int callback_called;
 
 static void service_callback(void *udata, const char *name, const struct sockaddr_in6 *sa, const char *txt) {
 	static const char expected_name[] = "Mr. Service";
-	static const uint8_t expected_ip[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+	static const char expected_ip[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
 	static const char expected_txt[] = "key1=value1\0key2=value2\0";
 	uint16_t port = 12345;
 
