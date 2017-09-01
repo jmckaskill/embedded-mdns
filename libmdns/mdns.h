@@ -52,11 +52,8 @@ int emdns_set_host(struct emdns *m, const char *name);
 int emdns_publish_ip6(struct emdns *m, emdns_time now, const struct in6_addr *addr);
 int emdns_publish_service(struct emdns *m, emdns_time now, const char *svc, const char *txt, uint16_t port);
 
-// emdns_cb is the callback type used by emdns_scan and emdns_query
-// the provided record uses temporary memory
-// the application should copy it and the member variable strings out if required
-typedef void (*emdns_addcb)(void *udata, const char *name, const struct sockaddr_in6 *sa, const char *txt, size_t txtsz);
-typedef void (*emdns_rmcb)(void *udata, const char *name);
+typedef void(*emdns_ip6cb)(void *udata, const struct in6_addr *addr);
+typedef void(*emdns_svccb)(void *udata, const char *name, const struct sockaddr_in6 *sa, const char *txt);
 
 // emdns_query starts a one-shot DNS query
 // the callback will be called with the first valid response or on timeout
@@ -70,7 +67,7 @@ typedef void (*emdns_rmcb)(void *udata, const char *name);
 // possible errors include:
 // MDNS_TOO_MANY - too many concurrent requests
 // MDNS_MALFORMED - malformed request record
-int emdns_query_ip6(struct emdns *m, emdns_time now, const char *name, void *udata, emdns_addcb cb);
+int emdns_query_ip6(struct emdns *m, emdns_time now, const char *name, void *udata, emdns_ip6cb cb);
 
 // emdns_scan starts a continuous scan
 // add will be called as results are found
@@ -82,7 +79,7 @@ int emdns_query_ip6(struct emdns *m, emdns_time now, const char *name, void *uda
 // possible errors include:
 // MDNS_TOO_MANY - too many concurrent requests
 // MDNS_MALFORMED - malformed request record
-int emdns_scan(struct emdns *m, emdns_time now, const char *name, void *udata, emdns_addcb add, emdns_rmcb remove);
+int emdns_scan_ip6(struct emdns *m, emdns_time now, const char *name, void *udata, emdns_svccb cb);
 
 // emdns_stop stops a pending scan, query or publish
 int emdns_stop(struct emdns *m, int ref);
@@ -128,10 +125,13 @@ struct emdns_request {
     emdns_time next_request;
 	int wait_duration;
 	enum emdns_request_type type;
-    emdns_addcb add;
-    emdns_rmcb remove;
+	union {
+		emdns_ip6cb ip6;
+		emdns_svccb service;
+	} callbacks;
     void *udata;
 	struct emdns_answer *answers;
+	uint16_t requestoff;
 	uint8_t namesz;
 	uint8_t name[256];
 };
@@ -165,8 +165,6 @@ struct emdns {
     struct emdns_request requestv[EMDNS_MAX_REQUESTS];
     struct emdns_publish publishv[EMDNS_MAX_PUBLISH];
 	struct emdns_answer answerv[EMDNS_MAX_ANSWERS];
-    struct emdns_request *to_publish;
-    struct emdns_request *to_republish;
     struct emdns_request *free_request;
     struct emdns_answer *free_answer;
 	struct emdns_publish *free_publish;

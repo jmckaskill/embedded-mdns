@@ -20,18 +20,21 @@ static struct answer *create_answer(const char *name) {
 	return ret;
 }
 
-static void onadd(void *udata, const char *name, const struct sockaddr_in6 *sa, const char *txt, size_t txtsz) {
+static void service_update(void *udata, const char *name, const struct sockaddr_in6 *sa, const char *txt) {
 	struct answer *a = create_answer(name);
-	a->text = (char*) malloc(txtsz + 1);
-	memcpy(a->text, txt, txtsz);
-	a->text[txtsz] = '\0';
-	memcpy(&a->addr, sa, sizeof(a->addr));
-	PostMessage(g_window, MSG_ADD, (WPARAM) a, 0);
-}
-
-static void onrm(void *udata, const char *name) {
-	struct answer *a = create_answer(name);
-	PostMessage(g_window, MSG_ADD, (WPARAM) a, 0);
+	if (sa) {
+		// txt is a string vector, find the end so we can copy it
+		const char *txtend = txt;
+		while (*txtend) {
+			txtend += strlen(txtend) + 1;
+		}
+		a->text = (char*) malloc(txtend - txt + 1);
+		memcpy(a->text, txt, txtend - txt + 1);
+		memcpy(&a->addr, sa, sizeof(a->addr));
+		PostMessage(g_window, MSG_ADD, (WPARAM) a, 0);
+	} else {
+		PostMessage(g_window, MSG_REMOVE, (WPARAM) a, 0);
+	}
 }
 
 static DWORD WINAPI scan_thread(LPVOID param) {
@@ -45,7 +48,7 @@ static DWORD WINAPI scan_thread(LPVOID param) {
 	WSAEventSelect(fd, ev, FD_READ);
 
 	struct emdns m = {0};
-	emdns_scan(&m, (emdns_time) GetTickCount64(), svc, NULL, &onadd, &onrm);
+	emdns_scan_ip6(&m, (emdns_time) GetTickCount64(), svc, NULL, &service_update);
 
 	for (;;) {
 		char buf[1024];

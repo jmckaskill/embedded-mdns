@@ -120,6 +120,8 @@
   <ItemGroup>
     <ClCompile Include="main.c" />
     <ClCompile Include="publish.c" />
+    <ClCompile Include="query.c" />
+    <ClCompile Include="scan.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="tests.h" />

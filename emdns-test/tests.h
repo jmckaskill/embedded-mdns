@@ -1,11 +1,14 @@
 #pragma once
 
+#include <mdns.h>
 #include <inttypes.h>
 #include <string.h>
 #include <stdio.h>
 
 int test_publish_ip6();
 int test_publish_service();
+int test_query();
+int test_scan();
 
 static inline void check(int *err, int64_t have, int64_t want, const char *test) {
 	fprintf(stderr, "  %s: ", test);
