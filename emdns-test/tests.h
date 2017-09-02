@@ -20,6 +20,16 @@ static inline void check(int *err, int64_t have, int64_t want, const char *test)
 	}
 }
 
+static inline void check_not_null(int *err, void *have, const char *test) {
+	fprintf(stderr, "  %s: ", test);
+	if (have) {
+		fprintf(stderr, "OK\n");
+	} else {
+		fprintf(stderr, "FAIL\n    Want: Not Null\n    Have: NULL\n");
+		(*err)++;
+	}
+}
+
 static inline void check_range(int *err, int64_t have, int64_t min, int64_t max, const char *test) {
 	fprintf(stderr, "  %s: ", test);
 	if (min <= have && have <= max) {

@@ -39,7 +39,8 @@ static void service_update(void *udata, const char *name, const struct sockaddr_
 
 static DWORD WINAPI scan_thread(LPVOID param) {
 	const char *svc = (char*) param;
-	int fd = emdns_bind6(g_interface_id);
+	struct sockaddr_in6 send_addr;
+	int fd = emdns_bind6(g_interface_id, &send_addr);
 	if (fd < 0) {
 		return 1;
 	}
@@ -61,7 +62,7 @@ static DWORD WINAPI scan_thread(LPVOID param) {
 				timeout = (int) (next - now);
 				break;
 			}
-			send(fd, buf, w, 0);
+			sendto(fd, buf, w, 0, (struct sockaddr*) &send_addr, sizeof(send_addr));
 		}
 
 		HANDLE events[2] = {ev, g_stop_event};

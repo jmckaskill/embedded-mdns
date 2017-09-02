@@ -29,14 +29,15 @@ int main(int argc, char *argv[]) {
 		return 2;
 	}
 
-	int fd = emdns_bind6(interface_id);
+	struct sockaddr_in6 send_addr;
+	int fd = emdns_bind6(interface_id, &send_addr);
 
 	struct emdns m = {0};
 	//emdns_scan(&m, 0, MDNS_AAAA, argv[2], NULL, NULL, NULL);
 
 	char buf[512];
 	int w = emdns_next(&m, NULL, buf, sizeof(buf));
-	send(fd, buf, w, 0);
+	sendto(fd, buf, w, 0, (struct sockaddr*) &send_addr, sizeof(send_addr));
 
 	closesocket(fd);
 

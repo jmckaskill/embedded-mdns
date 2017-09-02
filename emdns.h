@@ -9,22 +9,13 @@
 #endif
 
 #include <stdint.h>
-#include "heap-inl.h"
-
-// maximum concurrent queries and scans
-#define EMDNS_MAX_REQUESTS 16
-
-// maximum number of entries to publish
-#define EMDNS_MAX_PUBLISH 8
-
-#define EMDNS_MAX_ANSWERS 32
 
 #define EMDNS_MAX_TXT_SIZE 256
+#define EMDNS_MAX_LABEL_SIZE 64
+#define EMDNS_MAX_HOST_SIZE 256
 
-// main structure for the library
-// should be zero initialized
-// contains no dynamically allocated data so can be thrown away on cleanup
 struct emdns;
+struct emdns_request;
 
 // common monotonic clock in milliseconds
 typedef int64_t emdns_time;
@@ -48,6 +39,9 @@ int emdns_next(struct emdns *m, emdns_time *time, void *buf, int sz);
 // time is the current time using the same monontonic clock as emdns_next
 int emdns_process(struct emdns *m, emdns_time time, const void *msg, int sz);
 
+struct emdns *emdns_new();
+void emdns_free(struct emdns *m);
+
 int emdns_set_host(struct emdns *m, const char *name);
 int emdns_publish_ip6(struct emdns *m, emdns_time now, const struct in6_addr *addr);
 int emdns_publish_service(struct emdns *m, emdns_time now, const char *svc, const char *txt, uint16_t port);
@@ -67,7 +61,7 @@ typedef void(*emdns_svccb)(void *udata, const char *name, const struct sockaddr_
 // possible errors include:
 // MDNS_TOO_MANY - too many concurrent requests
 // MDNS_MALFORMED - malformed request record
-int emdns_query_ip6(struct emdns *m, emdns_time now, const char *name, void *udata, emdns_ip6cb cb);
+struct emdns_request *emdns_query_ip6(struct emdns *m, emdns_time now, const char *name, void *udata, emdns_ip6cb cb);
 
 // emdns_scan starts a continuous scan
 // add will be called as results are found
@@ -79,102 +73,15 @@ int emdns_query_ip6(struct emdns *m, emdns_time now, const char *name, void *uda
 // possible errors include:
 // MDNS_TOO_MANY - too many concurrent requests
 // MDNS_MALFORMED - malformed request record
-int emdns_scan_ip6(struct emdns *m, emdns_time now, const char *name, void *udata, emdns_svccb cb);
+struct emdns_request *emdns_scan_ip6(struct emdns *m, emdns_time now, const char *name, void *udata, emdns_svccb cb);
 
 // emdns_stop stops a pending scan, query or publish
-int emdns_stop(struct emdns *m, int ref);
+int emdns_stop(struct emdns *m, struct emdns_request *r);
 
 // emdns_bind6 creates and binds an IPv6 socket bound to the correct port
 // with the request multicast address setup.
 // sa returns the address packets should be sent to/from
 // the socket is bound to the interface specified
 // this is only implemented for mainstream operating systems
-int emdns_bind6(int interface_id);
+int emdns_bind6(int interface_id, struct sockaddr_in6 *send_addr);
 
-// internal implementation
-
-enum emdns_request_type {
-	EMDNS_NO_REQUEST,
-	EMDNS_QUERY_AAAA,
-	EMDNS_QUERY_TXT_SRV,
-	EMDNS_SCAN_PTR,
-};
-
-struct emdns_request;
-
-struct emdns_answer {
-	struct emdns_answer *next;
-	struct emdns_request *subrequest;
-	struct emdns_request *owner;
-	unsigned have_txt : 1;
-	unsigned have_srv : 1;
-	unsigned have_aaaa : 1;
-	emdns_time expiry;
-	struct sockaddr_in6 sa;
-	uint16_t txtsz;
-	uint8_t labelsz;
-	uint8_t hostsz;
-	char label[64];
-	uint8_t txt[EMDNS_MAX_TXT_SIZE];
-	uint8_t host[256];
-};
-
-struct emdns_request {
-    struct heap_node hn;
-	struct emdns_request *next;
-    emdns_time next_request;
-	int wait_duration;
-	enum emdns_request_type type;
-	union {
-		emdns_ip6cb ip6;
-		emdns_svccb service;
-	} callbacks;
-    void *udata;
-	struct emdns_answer *answers;
-	uint16_t requestoff;
-	uint8_t namesz;
-	uint8_t name[256];
-};
-
-enum emdns_publish_type {
-	EMDNS_NO_PUBLISH,
-	EMDNS_PUBLISH_AAAA,
-	EMDNS_PUBLISH_SERVICE,
-};
-
-struct emdns_publish {
-    struct heap_node hn;
-	struct emdns_publish *next;
-	emdns_time next_announce;
-    emdns_time last_publish;
-	int wait_duration;
-	enum emdns_publish_type type;
-    union {
-        struct in6_addr ip6;
-        struct {
-            uint16_t port;
-			uint16_t txtsz;
-			uint8_t namesz;
-			uint8_t name[256];
-			uint8_t txt[EMDNS_MAX_TXT_SIZE];
-        } svc;
-    } data;
-};
-
-struct emdns {
-    struct emdns_request requestv[EMDNS_MAX_REQUESTS];
-    struct emdns_publish publishv[EMDNS_MAX_PUBLISH];
-	struct emdns_answer answerv[EMDNS_MAX_ANSWERS];
-    struct emdns_request *free_request;
-    struct emdns_answer *free_answer;
-	struct emdns_publish *free_publish;
-    int answers_used;
-    int requests_used;
-	int publish_used;
-	struct heap publish_heap;
-	struct heap request_heap;
-
-	struct emdns_publish *publish_ips;
-	uint8_t hostsz;
-	uint8_t host[256];
-};

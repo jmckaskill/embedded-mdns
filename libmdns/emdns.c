@@ -1,4 +1,4 @@
-#include "mdns.h"
+#include "emdns-impl.h"
 #include <assert.h>
 #include <string.h>
 #include <stdbool.h>
@@ -78,76 +78,43 @@ static int compare_publish(const struct heap_node *a, const struct heap_node *b)
 static int compare_request(const struct heap_node *a, const struct heap_node *b) {
 	struct emdns_request *ap = container_of(a, struct emdns_request, hn);
 	struct emdns_request *bp = container_of(b, struct emdns_request, hn);
-	return ap->next_request < bp->next_request;
+	return ap->next_request < b p->next_request;
 }
 
-static struct emdns_answer *new_answer(struct emdns *m) {
-	if (m->free_answer) {
-		struct emdns_answer *a = m->free_answer;
-		m->free_answer = a->next;
-		a->next = NULL;
-		return a;
-	}
-
-	if (m->answers_used < EMDNS_MAX_ANSWERS) {
-		return &m->answerv[m->answers_used++];
-	}
-
-	return NULL;
-}
-
-#if 0
-static void free_answer(struct emdns *m, struct emdns_answer *a) {
-	assert(a->subrequest == NULL);
-	a->next = m->free_answer;
-	m->free_answer = a;
-}
-#endif
-
-static struct emdns_request *new_request(struct emdns *m) {
-	if (m->free_request) {
-		struct emdns_request *r = m->free_request;
-		m->free_request = r->next;
-		r->next = NULL;
-		return r;
-	}
-
-	if (m->requests_used < EMDNS_MAX_REQUESTS) {
-		return &m->requestv[m->requests_used++];
-	}
-
-	return NULL;
-}
-
-static void free_request(struct emdns *m, struct emdns_request *r) {
-	assert(r->answers == NULL);
-	r->next = m->free_request;
-	m->free_request = r;
-	if (r->type) {
-		heap_remove(&m->request_heap, &r->hn, &compare_request);
-		r->type = 0;
+static int hash_dns_name(const uint8_t *a) {
+	for (;;) {
+		uint8_t len = *(a++);
+		for (uint8_t i = 0; i < len; i++) {
+			h = (h << 5) - h + (khint_t)*s;
+		}
 	}
 }
 
-static struct emdns_publish *new_publish(struct emdns *m) {
-	if (m->free_publish) {
-		struct emdns_publish *r = m->free_publish;
-		m->free_publish = r->next;
-		r->next = NULL;
-		return r;
+static bool equals_dns_name(const uint8_t *a, const uint8_t *b) {
+	for (;;) {
+		uint8_t alen = *(a++);
+		uint8_t blen = *(b++);
+		if (alen != blen) {
+			return false;
+		}
+		if (!alen) {
+			return true;
+		}
+		if (strncasecmp((char*) a, (char*) b, alen)) {
+			return false;
+		}
+		a += alen;
+		b += blen;
 	}
-
-	if (m->publish_used < EMDNS_MAX_PUBLISH) {
-		return &m->publishv[m->publish_used++];
-	}
-
-	return NULL;
 }
 
-static void free_publish(struct emdns *m, struct emdns_publish *r) {
-	r->next = m->free_publish;
-	m->free_publish = r;
-	heap_remove(&m->publish_heap, &r->hn, &compare_publish);
+int emdns_init(struct emdns *m, void *udata, emdns_realloc cb) {
+	memset(m, 0, sizeof(*m));
+	m->udata = udata;
+	m->realloc = cb;
+}
+
+void emdns_destroy(struct emdns *m) {
 }
 
 // copies a dot separated string into dns form
@@ -251,24 +218,6 @@ static int decode_dns_name(uint8_t *buf, const void *msg, int sz, uint16_t *poff
 	}
 }
 
-static int compare_dns_name(const uint8_t *a, const uint8_t *b) {
-	for (;;) {
-		uint8_t alen = *(a++);
-		uint8_t blen = *(b++);
-		if (alen != blen) {
-			return alen - blen;
-		}
-		if (!alen) {
-			return 0;
-		}
-		int diff = strncasecmp((char*) a, (char*) b, alen);
-		if (diff) {
-			return diff;
-		}
-		a += alen;
-		b += blen;
-	}
-}
 
 static int encode_txt(uint8_t *buf, const char *txt) {
 	int off = 0;
@@ -327,8 +276,8 @@ int emdns_publish_ip6(struct emdns *m, emdns_time now, const struct in6_addr *ad
 	if (!p) {
 		return EMDNS_TOO_MANY;
 	}
-	p->next = m->publish_ips;
-	m->publish_ips = p;
+	p->next = m->publish_ip_list;
+	m->publish_ip_list = p;
 
 	p->next_announce = now + random_wait(1, 250);
 	p->last_publish = 0;
@@ -371,7 +320,7 @@ int emdns_publish_service(struct emdns *m, emdns_time now, const char *svc, cons
 	return (int) (p - m->publishv);
 }
 
-static int encode_service(struct emdns *m, struct emdns_publish *r, uint8_t *u, int *poff, int sz) {
+static int encode_service_publish(struct emdns *m, struct emdns_publish *r, uint8_t *u, int *poff, int sz) {
 	// SRV
 	int reqsz = r->data.svc.namesz + 2 /*type*/ + 2 /*class*/ + 4 /*ttl*/ + 2 /*datasz*/ + 2 /*pri*/ + 2 /*weight*/ + 2 /*port*/ + m->hostsz;
 	// TXT
@@ -424,7 +373,7 @@ static int encode_service(struct emdns *m, struct emdns_publish *r, uint8_t *u, 
 	return 0;
 }
 
-static int encode_ip6(struct emdns *m, struct emdns_publish *r, uint8_t *u, int *poff, int sz) {
+static int encode_ip6_publish(struct emdns *m, struct emdns_publish *r, uint8_t *u, int *poff, int sz) {
 	int reqsz = m->hostsz + 2 /*type*/ + 2 /*class*/ + 4 /*ttl*/ + 2 /*datasz*/ + 16 /*ip*/;
 
 	if (*poff + reqsz > sz) {
@@ -442,7 +391,67 @@ static int encode_ip6(struct emdns *m, struct emdns_publish *r, uint8_t *u, int 
 	memcpy(p, &r->data.ip6, sizeof(r->data.ip6));
 	p += sizeof(r->data.ip6);
 
-	*poff = (int) (p - u);
+	*poff += reqsz;
+	assert(u + *poff == p);
+	return 0;
+}
+
+static int encode_ip6_request(struct emdns *m, struct emdns_request *r, uint8_t *u, int *poff, int sz) {
+	int reqsz = r->u.query.namesz + 4;
+
+	if (*poff + reqsz > sz) {
+		return -1;
+	}
+
+	uint8_t *p = u + *poff;
+	memcpy(p, r->u.query.name, r->u.query.namesz);
+	p += r->u.query.namesz;
+	put_big_16(p, RTYPE_AAAA);
+	put_big_16(p + 2, RCLASS_IN);
+	p += 4;
+
+	*poff += reqsz;
+	assert(u + *poff == p);
+	return 0;
+}
+
+static int encode_scan_request(struct emdns *m, struct emdns_request *r, uint8_t *u, int *poff, int sz) {
+	int reqsz = r->u.scan.namesz + 4;
+
+	if (*poff + reqsz > sz) {
+		return -1;
+	}
+
+	uint8_t *p = u + *poff;
+	memcpy(p, r->u.scan.name, r->u.scan.namesz);
+	p += r->u.scan.namesz;
+	put_big_16(p, RTYPE_PTR);
+	put_big_16(p + 2, RCLASS_IN);
+	p += 4;
+
+	*poff += reqsz;
+	assert(u + *poff == p);
+	return 0;
+}
+
+static int encode_answer_request(struct emdns *m, struct emdns_request *r, uint8_t *u, int *poff, int sz) {
+	int reqsz = 0;
+
+	int reqsz = r->u.scan.namesz + 4;
+
+	if (*poff + reqsz > sz) {
+		return -1;
+	}
+
+	uint8_t *p = u + *poff;
+	memcpy(p, r->u.scan.name, r->u.scan.namesz);
+	p += r->u.scan.namesz;
+	put_big_16(p, RTYPE_PTR);
+	put_big_16(p + 2, RCLASS_IN);
+	p += 4;
+
+	*poff += reqsz;
+	assert(u + *poff == p);
 	return 0;
 }
 
@@ -461,20 +470,15 @@ static void update_publish_time(struct emdns *m, struct emdns_publish *r, emdns_
 static void update_request_time(struct emdns *m, struct emdns_request *r, emdns_time now) {
 	heap_remove(&m->request_heap, &r->hn, &compare_request);
 	r->next_request = now + r->wait_duration;
-	if (r->wait_duration < 60 * 60 * 1000) {
+	if (r->type != EMDNS_SCAN_ANSWER && r->wait_duration < 60 * 60 * 1000) {
 		r->wait_duration *= 2;
 	}
 	heap_insert(&m->request_heap, &r->hn, &compare_request);
 }
 
-int emdns_next(struct emdns *m, emdns_time *time, void *buf, int sz) {
-	assert(sz >= MIN_MESSAGE_SIZE);
-	uint8_t *u = (uint8_t*) buf;
-	uint16_t num_publish = 0;
+static int get_next_publish(struct emdns *m, emdns_time *time, uint8_t *u, int sz) {
 	bool do_publish = false;
-	emdns_time next_publish = INT64_MAX;
-	emdns_time next_request = INT64_MAX;
-
+	int num_publish = 0;
 	int off = 12;
 
 	for (;;) {
@@ -485,12 +489,12 @@ int emdns_next(struct emdns *m, emdns_time *time, void *buf, int sz) {
 
 		struct emdns_publish *r = container_of(hn, struct emdns_publish, hn);
 		if (r->next_announce > *time) {
-			next_publish = r->next_announce;
+			*time = r->next_announce;
 			break;
 		}
 
 		if (r->type == EMDNS_PUBLISH_SERVICE) {
-			if (encode_service(m, r, u, &off, sz)) {
+			if (encode_service_publish(m, r, u, &off, sz)) {
 				break;
 			}
 			num_publish++;
@@ -502,29 +506,34 @@ int emdns_next(struct emdns *m, emdns_time *time, void *buf, int sz) {
 
 	assert(off <= sz);
 
-	if (do_publish) {
-		for (struct emdns_publish *r = m->publish_ips; r != NULL; r = r->next) {
-			if (encode_ip6(m, r, u, &off, sz)) {
-				break;
-			}
-			if (r->last_publish != *time) {
-				update_publish_time(m, r, *time);
-			}
-			num_publish++;
-		}
-
-		put_big_16(u, 0); // transaction ID
-		put_big_16(u + 2, FLAG_RESPONSE | FLAG_AUTHORITY); // flags
-		put_big_16(u + 4, 0); // questions
-		put_big_16(u + 6, num_publish); // answers
-		put_big_16(u + 8, 0); // authority
-		put_big_16(u + 10, 0); // additional
-
-		return off;
+	if (!do_publish) {
+		return EMDNS_PENDING;
 	}
 
+	for (struct emdns_publish *r = m->publish_ip_list; r != NULL; r = r->next) {
+		if (encode_ip6_publish(m, r, u, &off, sz)) {
+			break;
+		}
+		if (r->last_publish != *time) {
+			update_publish_time(m, r, *time);
+		}
+		num_publish++;
+	}
+
+	put_big_16(u, 0); // transaction ID
+	put_big_16(u + 2, FLAG_RESPONSE | FLAG_AUTHORITY); // flags
+	put_big_16(u + 4, 0); // questions
+	put_big_16(u + 6, num_publish); // answers
+	put_big_16(u + 8, 0); // authority
+	put_big_16(u + 10, 0); // additional
+
+	return off;
+}
+
+static int get_next_request(struct emdns *m, emdns_time *time, uint8_t *u, int sz) {
 	struct emdns_request *scan_list = NULL;
 	uint16_t num_questions = 0;
+	int off = 12;
 
 	for (;;) {
 		struct heap_node *hn = heap_min(&m->request_heap);
@@ -534,7 +543,7 @@ int emdns_next(struct emdns *m, emdns_time *time, void *buf, int sz) {
 
 		struct emdns_request *r = container_of(hn, struct emdns_request, hn);
 		if (r->next_request > *time) {
-			next_request = r->next_request;
+			*time = r->next_request;
 			break;
 		}
 
@@ -629,6 +638,27 @@ int emdns_next(struct emdns *m, emdns_time *time, void *buf, int sz) {
 
 		return off;
 	}
+}
+
+int emdns_next(struct emdns *m, emdns_time *time, void *buf, int sz) {
+	assert(sz >= MIN_MESSAGE_SIZE);
+
+	emdns_time next_publish = *time;
+	int sz = get_next_publish(m, &next_publish, (uint8_t*) buf, sz);
+	if (sz >= 0) {
+		return sz;
+	}
+
+	emdns_time next_request = *time;
+	int sz = get_next_request(m, &next_request, (uint8_t*) buf, sz);
+	if (sz >= 0) {
+		return sz;
+	}
+
+	// wakeup with the sooner time
+	*time = next_publish < next_request ? next_publish : next_request;
+	return EMDNS_PENDING;
+	
 
 	*time = next_request < next_publish ? next_request : next_publish;
 	return EMDNS_PENDING;
@@ -678,7 +708,7 @@ static struct emdns_answer *create_answer(struct emdns *m, struct emdns_request 
 }
 
 static void publish_answer(struct emdns_answer *a) {
-	if (a->have_txt && a->have_srv && a->have_aaaa) {
+	if (a->have_txt && a->have_srv && a->have_aaaa && a->have_ptr) {
 		a->owner->callbacks.service(a->owner->udata, (char*) a->label, &a->sa, (char*) a->txt);
 	}
 }
@@ -823,6 +853,8 @@ int emdns_process(struct emdns *m, emdns_time now, const void *msg, int sz) {
 					}
 
 					a->expiry = now + ((emdns_time) ttl * 1000);
+					a->have_ptr = 1;
+					publish_answer(a);
 					break;
 				}
 			}
@@ -846,7 +878,7 @@ int emdns_process(struct emdns *m, emdns_time now, const void *msg, int sz) {
 						continue;
 					}
 
-					struct emdns_answer *a = find_answer(r, (char*) name + 1, labelsz);
+					struct emdns_answer *a = create_answer(m, r, (char*) name + 1, labelsz);
 					if (!a) {
 						break;
 					}
@@ -927,7 +959,7 @@ int emdns_query_ip6(struct emdns *m, emdns_time now, const char *name, void *uda
 		return EMDNS_TOO_MANY;
 	}
 
-	int sz = encode_dns_name(r->name, name);
+	int sz = encode_dns_name(r->u.query.name, name);
 	if (sz < 0) {
 		free_request(m, r);
 		return EMDNS_MALFORMED;
@@ -936,7 +968,7 @@ int emdns_query_ip6(struct emdns *m, emdns_time now, const char *name, void *uda
 	r->type = EMDNS_QUERY_AAAA;
 	r->callbacks.ip6 = cb;
 	r->udata = udata;
-	r->namesz = (uint8_t) sz;
+	r->u.query.namesz = (uint8_t) sz;
 	r->next_request = now;
 	r->wait_duration = 1000;
 
@@ -951,18 +983,16 @@ int emdns_scan_ip6(struct emdns *m, emdns_time now, const char *name, void *udat
 		return EMDNS_TOO_MANY;
 	}
 
-	int sz = encode_dns_name(r->name, name);
+	int sz = encode_dns_name(r->u.scan.name, name);
 	if (sz < 0) {
 		free_request(m, r);
 		return EMDNS_MALFORMED;
 	}
 
-	assert(r->answers == NULL);
-
 	r->type = EMDNS_SCAN_PTR;
 	r->callbacks.service = cb;
 	r->udata = udata;
-	r->namesz = (uint8_t) sz;
+	r->u.scan.namesz = (uint8_t) sz;
 	r->next_request = now;
 	r->wait_duration = 1000;
 

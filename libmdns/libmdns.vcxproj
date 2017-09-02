@@ -116,12 +116,16 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="..\emdns.h" />
+    <ClInclude Include="emdns-impl.h" />
     <ClInclude Include="heap-inl.h" />
-    <ClInclude Include="mdns.h" />
+    <ClInclude Include="khash.h" />
+    <ClInclude Include="memswap.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="mdns-windows.c" />
-    <ClCompile Include="mdns.c" />
+    <ClCompile Include="emdns-sysalloc.c" />
+    <ClCompile Include="emdns-windows.c" />
+    <ClCompile Include="emdns.c" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
