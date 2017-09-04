@@ -7,3 +7,4 @@ Release
 *.opendb
 *.db
 /.vscode
+/mdns-win32-browser/debug.log
