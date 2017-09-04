@@ -23,7 +23,7 @@ int test_publish_ip6() {
 		"\0\0" // transaction ID
 		"\x84\0" // flags - response & authoritative
 		"\0\0" // questions
-		"\0\x01" // answers - one record
+		"\0\x02" // answers - AAAA & NSEC
 		"\0\0" // authority
 		"\0\0" // additional
 		"\x04" "test" "\x05" "local" "\0" // test.local.
@@ -31,7 +31,16 @@ int test_publish_ip6() {
 		"\x80\x01" // internet class with the cache bit set
 		"\0\0\0\x78" // TTL - 0x78 = 120 seconds
 		"\0\x10" // data length 16 bytes
-		"\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10"; // IP address
+		"\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10" // IP address
+		"\xC0\x0C" // redir to aaaa name
+		"\0\x2F" // 47 - NSEC
+		"\x80\x01" // internet class with the cache bit set
+		"\0\0\0\x78" // TTL - 0x78 = 120 seconds
+		"\0\x08" // data length 8 bytes
+		"\xC0\x0C" // next domain name -> redir to AAAA name
+		"\0\x04" // bitmap size
+		"\0\0\0\x08"; // bitmap
+
 	check(&err, emdns_next(m, &now, buf, sizeof(buf)), sizeof(publish_msg) - 1, "initial message size");
 	check_data(&err, buf, publish_msg, sizeof(publish_msg) - 1, "initial message data");
 	

@@ -614,6 +614,10 @@ static void init_publish(struct emdns *m, struct publish *p, emdns_time now, enu
 }
 
 int emdns_publish_ip6(struct emdns *m, emdns_time now, const struct in6_addr *addr) {
+	if (m->hostname.namesz <= 1) {
+		return EMDNS_MALFORMED;
+	}
+
     int id = 0;
     while (id < MAX_IPS && m->user_ips[id]) {
         id++;
@@ -1011,6 +1015,7 @@ static int process_request(struct emdns *m, emdns_time now, uint8_t *u, int sz, 
 
         switch (rtype) {
         case RTYPE_AAAA:
+		case RTYPE_NSEC:
             if (namesz == m->hostname.namesz && equals_dns_name(name, m->hostname.name)) {
                 for (int id = 0; id < MAX_IPS; id++) {
                     struct pub_ip *r = m->user_ips[id];
@@ -1215,17 +1220,23 @@ static int encode_result(struct result *r, emdns_time now, uint8_t *buf, int sz,
     return 0;
 }
 
-static int encode_local_addr(struct emdns *m, struct pub_ip *s, uint8_t *buf, int sz, int *off) {
+static int encode_local_addr(struct emdns *m, struct pub_ip *s, uint8_t *buf, int sz, int *off, int *hostoff) {
     int datasz = 16;
-    int reqsz = m->hostname.namesz + 2 /*type*/ + 2 /*class*/ + 4 /*ttl*/ + 2 /*datasz*/ + datasz;
+    int reqsz = (*hostoff ? 2 : m->hostname.namesz) + 2 /*type*/ + 2 /*class*/ + 4 /*ttl*/ + 2 /*datasz*/ + datasz;
 
 	if (*off + reqsz > sz) {
 		return -1;
 	}
 
 	uint8_t *p = buf + *off;
-    memcpy(p, m->hostname.name, m->hostname.namesz);
-    p += m->hostname.namesz;
+	if (*hostoff) {
+		put_big_16(p, LABEL_PTR16 | *hostoff);
+		p += 2;
+	} else {
+		*hostoff = *off;
+		memcpy(p, m->hostname.name, m->hostname.namesz);
+		p += m->hostname.namesz;
+	}
 	put_big_16(p, RTYPE_AAAA);
 	put_big_16(p + 2, RCLASS_IN_FLUSH);
 	put_big_32(p + 4, TTL_DEFAULT);
@@ -1233,6 +1244,33 @@ static int encode_local_addr(struct emdns *m, struct pub_ip *s, uint8_t *buf, in
 	p += 10;
 	memcpy(p, &s->addr, 16);
 	p += 16;
+
+	*off += reqsz;
+	assert(p - buf == *off);
+	return 0;
+}
+
+static int encode_nsec(struct emdns *m, uint8_t *buf, int sz, int *off, int hostoff) {
+	static const uint8_t bitmap[] = {0,0,0,8}; // only AAAA
+	uint16_t bitmapsz = sizeof(bitmap);
+	uint16_t datasz = 2 /*next name*/ + 2 /*bitmap size*/ + bitmapsz;
+	int reqsz = 2 /*name*/ + 2 /*type*/ + 2 /*class*/ + 4 /*ttl*/ + 2 /*datasz*/ + datasz;
+
+	if (*off + reqsz > sz) {
+		return -1;
+	}
+
+	uint8_t *p = buf + *off;
+	put_big_16(p, LABEL_PTR16 | hostoff);
+	put_big_16(p + 2, RTYPE_NSEC);
+	put_big_16(p + 4, RCLASS_IN_FLUSH);
+	put_big_32(p + 6, TTL_DEFAULT);
+	put_big_16(p + 10, datasz);
+	put_big_16(p + 12, LABEL_PTR16 | hostoff);
+	put_big_16(p + 14, bitmapsz);
+	p += 16;
+	memcpy(p, bitmap, sizeof(bitmap));
+	p += sizeof(bitmap);
 
 	*off += reqsz;
 	assert(p - buf == *off);
@@ -1335,11 +1373,12 @@ static int get_next_publish(struct emdns *m, emdns_time *time, uint8_t *u, int s
     }
     
     // if we are publishing something, then we should publish all local addresses
+	int hostoff = 0;
 
     for (int id = 0; id < MAX_IPS; id++) {
         struct pub_ip *r = m->user_ips[id];
 		if (r) {
-			if (encode_local_addr(m, r, u, sz, &off)) {
+			if (encode_local_addr(m, r, u, sz, &off, &hostoff)) {
 				break;
 			}
 			if (r->h.last_publish != now) {
@@ -1347,6 +1386,11 @@ static int get_next_publish(struct emdns *m, emdns_time *time, uint8_t *u, int s
 			}
 			num_publish++;
 		}
+	}
+
+	// we only support AAAA records for the hostname. we should publish an NSEC record indicating that
+	if (hostoff && !encode_nsec(m, u, sz, &off, hostoff)) {
+		num_publish++;
 	}
 
 	put_big_16(u, 0); // transaction ID
