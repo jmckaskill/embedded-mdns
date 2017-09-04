@@ -44,7 +44,7 @@ int emdns_publish_ip6(struct emdns *m, emdns_time now, const struct in6_addr *ad
 int emdns_publish_service(struct emdns *m, emdns_time now, const char *svc, const char *txt, uint16_t port);
 
 typedef void(*emdns_ip6cb)(void *udata, const struct in6_addr *addr);
-typedef void(*emdns_svccb)(void *udata, const char *name, size_t namesz, const struct sockaddr_in6 *sa, const char *txt, size_t txtsz);
+typedef void(*emdns_svccb)(void *udata, const char *name, int namesz, const struct sockaddr_in6 *sa, const char *txt, int txtsz);
 
 // emdns_query starts a one-shot DNS query
 // the callback will be called with the first valid response or on timeout

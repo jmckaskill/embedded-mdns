@@ -35,8 +35,6 @@ void emdns_mem_free(void *data);
 #define RTYPE_TXT 16
 #define RTYPE_PTR 12
 #define RTYPE_NSEC 47
-#define RTYPE_MAX 254
-#define RTYPE_PTR_TARGET 255
 
 #define LABEL_MASK 0xC0
 #define LABEL_NORMAL 0x00
@@ -129,9 +127,10 @@ struct timeout {
 
 struct record {
 	struct heap_node hn;
-	struct timeout t;
+	emdns_time next;
 	struct key key;
 	enum record_type type;
+	unsigned scheduled : 1;
 };
 
 struct result {
@@ -155,12 +154,13 @@ struct result {
 	struct result *srv_next, *srv_prev;
 
 	char *txt; // heap allocated
-	size_t txtsz;
+	uint16_t txtsz;
 	struct sockaddr_in6 sa;
 };
 
 struct addr {
 	struct record h;
+	struct timeout t;
 	struct in6_addr addr;
 	bool have_addr;
 	emdns_ip6cb cb;
@@ -171,11 +171,15 @@ struct addr {
 
 struct scan {
 	struct record h;
+	struct timeout t;
 	struct result *results;
-	struct scan *next_scan; // temporary used for generating known answers
 	emdns_svccb cb;
 	void *udata;
 	int userid;
+
+	// temporaries used for generating known answers
+	struct scan *next_scan;
+	int svcoff;
 };
 
 enum publish_type {
@@ -201,7 +205,7 @@ struct pub_service {
 	struct pub_service *next_answer; // temp member used for known answer processing
 	struct key name;
 	uint8_t *txt; // heap allocated
-	size_t txtsz;
+	uint16_t txtsz;
 	uint16_t port;
 };
 

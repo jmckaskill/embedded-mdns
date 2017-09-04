@@ -23,7 +23,7 @@ int test_query() {
 	check_not_null(&err, m, "new emdns");
 
 	emdns_time now = 0;
-	check(&err, emdns_query_ip6(m, now, "test.local", &my_udata, &ip6_callback), 0, "add ip6 query");
+	check_range(&err, emdns_query_ip6(m, now, "test.local", &my_udata, &ip6_callback), 0, INT_MAX, "add ip6 query");
 
 	static const char request_msg[] =
 		"\0\0" // transaction ID

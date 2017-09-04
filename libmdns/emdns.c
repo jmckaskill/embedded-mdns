@@ -10,13 +10,7 @@
 // HELPERS
 /////////////////////////////////
 
-static struct timeout *min_timeout(struct timeout *a, struct timeout *b, struct timeout *c) {
-    if (a->next < b->next) {
-        return c->next < a->next ? c : a;
-    } else {
-        return c->next < b->next ? c : b;
-    }
-}
+#define min3(a,b,c) ((a) < (b) ? ((c) < (a) ? (c) : (a)) : ((c) < (b) ? (c) : (b)))
 
 static inline void put_big_16(uint8_t *u, uint16_t v) {
 	u[0] = (uint8_t) (v >> 8);
@@ -62,7 +56,7 @@ static int compare_publish(const struct heap_node *a, const struct heap_node *b)
 static int compare_record(const struct heap_node *a, const struct heap_node *b) {
 	struct record *ac = container_of(a, struct record, hn);
 	struct record *bc = container_of(b, struct record, hn);
-	return ac->t.next < bc->t.next;
+	return ac->next < bc->next;
 }
 
 static void hash_key(struct key *r) {
@@ -146,8 +140,8 @@ static int encode_dns_name(uint8_t *buf, const char *src) {
         buf[w++] = (uint8_t) len;
 
 		memcpy(buf + w, src, len);
-        w += len;
-        src += len;
+        w += (int) len;
+        src += (int) len;
 		
 		if (*src == '.') {
 			src++;
@@ -224,6 +218,56 @@ end:
     return w;
 }
 
+/////////////////////
+// TIMEOUT MANAGEMENT
+/////////////////////
+
+static void unschedule_request(struct emdns *m, struct record *r) {
+	assert(r->scheduled);
+    heap_remove(&m->cache_heap, &r->hn, &compare_record);
+	r->scheduled = 0;
+}
+
+static void schedule_request(struct emdns *m, struct record *r, emdns_time next) {
+	assert(!r->scheduled);
+	r->next = next;
+    heap_insert(&m->cache_heap, &r->hn, &compare_record);
+	r->scheduled = 1;
+}
+
+static void reschedule_request(struct emdns *m, struct record *r, emdns_time next) {
+	unschedule_request(m, r);
+	schedule_request(m, r, next);
+}
+
+static emdns_time increment_timeout(struct timeout *t, emdns_time now) {
+    t->next = now + t->step;
+    if (t->next > t->expiry) {
+        t->next = t->expiry;
+    }
+    if (t->step < 60 * 3600 * 1000) {
+        t->step *= 2;
+    }
+	return t->next;
+}
+
+static void reschedule_publish(struct emdns *m, struct publish *p, emdns_time time) {
+    heap_remove(&m->publish_heap, &p->hn, &compare_publish);
+    p->next_publish = time;
+    heap_insert(&m->publish_heap, &p->hn, &compare_publish);
+}
+
+static void increment_publish_timeout(struct emdns *m, struct publish *p, emdns_time now) {
+    heap_remove(&m->publish_heap, &p->hn, &compare_publish);
+    p->next_publish = now + p->publish_wait;
+	p->last_publish = now;
+    if (p->publish_wait > 4 * 1000) {
+        p->next_publish = INT64_MAX;
+    } else {
+        p->publish_wait *= 2;
+    }
+    heap_insert(&m->publish_heap, &p->hn, &compare_publish);
+}
 
 ////////////////////
 // MEMORY MANAGEMENT
@@ -293,7 +337,7 @@ static void remove_srv(struct emdns *m, struct result *r) {
     }
     r->srv = NULL;
     r->have_addr = false;
-    r->published = false;
+    r->dirty = true;
 
     if (a->results || a->cb) {
         return;
@@ -304,7 +348,7 @@ static void remove_srv(struct emdns *m, struct result *r) {
     assert(idx != kh_end(&m->addrs));
     kh_del(cache, &m->addrs, idx);
 
-    heap_remove(&m->cache_heap, &a->h.hn, &compare_record);
+	unschedule_request(m, &a->h);
     emdns_mem_free(a);
 }
 
@@ -319,14 +363,14 @@ static void delete_record(struct emdns *m, struct record *r, khash_t(cache) *h) 
     khint_t idx = kh_get(cache, h, &r->key);
     assert(idx != kh_end(h));
     kh_del(cache, h, idx);
-    heap_remove(&m->cache_heap, &r->hn, &compare_record);
+	unschedule_request(m, r);
     emdns_mem_free(r);
 }
 
 static void publish_result(struct result *r) {
     bool all = r->have_srv && r->have_ptr && r->have_txt && r->have_addr;
     uint8_t labelsz = r->h.key.name[0];
-    char *label = (char*) r->h.key.name + 1 + labelsz;
+    char *label = (char*) r->h.key.name + 1;
 
     if (r->published && !all) {
         r->scan->cb(r->scan->udata, label, labelsz, NULL, NULL, 0);
@@ -450,47 +494,6 @@ err:
     return EMDNS_MALFORMED;
 }
 
-/////////////////////
-// TIMEOUT MANAGEMENT
-/////////////////////
-
-static void schedule_request(struct emdns *m, struct record *r, struct timeout time) {
-    if (r->t.next) {
-        heap_remove(&m->cache_heap, &r->hn, &compare_record);
-    }
-    r->t = time;
-    heap_insert(&m->cache_heap, &r->hn, &compare_record);
-}
-
-static void increment_timeout(struct emdns *m, struct record *r, emdns_time now) {
-    assert(r->t.next);
-    heap_remove(&m->cache_heap, &r->hn, &compare_record);
-    r->t.next = now + r->t.step;
-    if (r->t.next > r->t.expiry) {
-        r->t.next = r->t.expiry;
-    }
-    if (r->t.step < 60 * 3600 * 1000) {
-        r->t.step *= 2;
-    }
-    heap_insert(&m->cache_heap, &r->hn, &compare_record);
-}
-
-static void reschedule_publish(struct emdns *m, struct publish *p, emdns_time time) {
-    heap_remove(&m->publish_heap, &p->hn, &compare_publish);
-    p->next_publish = time;
-    heap_insert(&m->publish_heap, &p->hn, &compare_publish);
-}
-
-static void increment_publish_timeout(struct emdns *m, struct publish *p, emdns_time now) {
-    heap_remove(&m->publish_heap, &p->hn, &compare_publish);
-    p->next_publish = now + p->publish_wait;
-    if (p->publish_wait > 8 * 1000) {
-        p->next_publish = INT64_MAX;
-    } else {
-        p->publish_wait *= 2;
-    }
-    heap_insert(&m->publish_heap, &p->hn, &compare_publish);
-}
 
 ////////////////
 // USER REQUESTS
@@ -509,13 +512,16 @@ static struct addr *create_addr(struct emdns *m, const struct key *k, emdns_time
         return NULL;
     }
 
-    struct timeout time;
-    time.next = now + random_wait(20, 120);
-    time.expiry = now + 6000;
-    time.step = 1000;
 
     init_record(&a->h, k, ADDR_RECORD);
-    schedule_request(m, &a->h, time);
+    a->t.next = now;
+    a->t.expiry = now + 6000;
+    a->t.step = 1000;
+
+	m->addrs.vals[idx] = &a->h;
+	m->addrs.keys[idx] = &a->h.key;
+
+    schedule_request(m, &a->h, a->t.next);
 
     return a;
 }
@@ -571,7 +577,6 @@ int emdns_scan_ip6(struct emdns *m, emdns_time now, const char *name, void *udat
     }
 
     k.namesz = (uint8_t) keysz;
-    hash_key(&k);
 
     int id = 0;
     while (id < MAX_ADDRS && m->user_addrs[id]) {
@@ -581,6 +586,7 @@ int emdns_scan_ip6(struct emdns *m, emdns_time now, const char *name, void *udat
         return EMDNS_TOO_MANY;
     }
 
+    hash_key(&k);
     int added;
     khint_t idx = kh_put(cache, &m->scans, &k, &added);
     if (added <= 0) {
@@ -593,18 +599,18 @@ int emdns_scan_ip6(struct emdns *m, emdns_time now, const char *name, void *udat
         return EMDNS_TOO_MANY;
     }
 
-    struct timeout time;
-    time.next = now;
-    time.expiry = INT64_MAX;
-    time.step = 1000;
 
     init_record(&s->h, &k, SCAN_RECORD);
-    schedule_request(m, &s->h, time);
+    s->t.next = now;
+    s->t.expiry = INT64_MAX;
+    s->t.step = 1000;
     
     s->cb = cb;
     s->udata = udata;
     m->scans.keys[idx] = &s->h.key;
     m->scans.vals[idx] = &s->h;
+
+    schedule_request(m, &s->h, s->t.next);
 
 	s->userid = id + ID_SCAN;
     m->user_scans[id] = s;
@@ -633,7 +639,7 @@ int emdns_publish_ip6(struct emdns *m, emdns_time now, const struct in6_addr *ad
         return EMDNS_TOO_MANY;
     }
 
-    init_publish(m, &p->h, now, PUBLISH_AAAA);
+    init_publish(m, &p->h, now + random_wait(1, 250), PUBLISH_AAAA);
     memcpy(&p->addr, addr, sizeof(*addr));
 
 	m->user_ips[id] = p;
@@ -672,19 +678,17 @@ static int process_srv(struct emdns *m, emdns_time now, struct result *r, struct
             r->srv_next->srv_prev = r;
         }
 
-        // we've changed address, the previous publish if any is invalid
-        r->published = false;
+        r->dirty = true;
         r->have_addr = r->srv->have_addr;
         memcpy(&r->sa.sin6_addr, &r->srv->addr, sizeof(r->srv->addr));
     }
 
     port = ntohs(port);
     if (!r->have_srv || r->sa.sin6_port != port) {
-        r->published = false; // we've changed port
+        r->dirty = true; // we've changed port
         r->sa.sin6_port = port;
     }
 
-    r->have_srv = true;
     return 0;
 }
 
@@ -746,10 +750,21 @@ static int process_result(struct emdns *m, emdns_time now, struct key *k, uint16
         if (r == NULL) {
             goto alloc_error;
         }
+
+		// the whole result times out if we don't see all the bits
+		// within this time frame. this is equivalent to a query for
+		// a single record
+		struct timeout timeout;
+		timeout.next = now;
+		timeout.step = 1000;
+		timeout.expiry = now + 6000;
         
         // init result
         init_record(&r->h, k, RESULT_RECORD);
         r->sa.sin6_family = AF_INET6;
+		r->time_srv = timeout;
+		r->time_ptr = timeout;
+		r->time_txt = timeout;
         
         // adding new records to the scan and table is delayed
         // until we've successfully decoded the new data
@@ -780,7 +795,7 @@ static int process_result(struct emdns *m, emdns_time now, struct key *k, uint16
     case RTYPE_TXT:
         if (!r->have_txt || r->txtsz != datasz || memcmp(r->txt, u+dataoff, datasz)) {
             // the text data has changed
-            r->published = false;
+            r->dirty = true;
             r->txt = emdns_mem_realloc(r->txt, datasz);
             if (!r->txt) {
                 goto alloc_error;
@@ -808,9 +823,13 @@ static int process_result(struct emdns *m, emdns_time now, struct key *k, uint16
             if (process_srv(m, now, r, &pk, port)) {
                 goto alloc_error;
             }
+			r->time_srv = time;
+			r->have_srv = true;
         }
         break;
     }
+
+    emdns_time next = min3(r->time_srv.next, r->time_ptr.next, r->time_txt.next);
 
     // we have successfully decoded the incoming data and allocated
     // any subresources. Let's hook things up
@@ -835,13 +854,12 @@ static int process_result(struct emdns *m, emdns_time now, struct key *k, uint16
         if (r->scan_next) {
             r->scan_next->scan_prev = r;
         }
-    }
 
-    struct timeout *next = min_timeout(&r->time_srv, &r->time_ptr, &r->time_txt);
-    if (next->next != r->h.t.next) {
-        schedule_request(m, &r->h, *next);
-    }
-    
+		schedule_request(m, &r->h, next);
+    } else if (next != r->h.next) {
+		reschedule_request(m, &r->h, next);
+	}
+
     publish_result(r);
     return off;
 
@@ -875,9 +893,12 @@ static int process_addr(struct emdns *m, emdns_time now, struct key *k, uint8_t 
     }
 
     struct addr *r = (struct addr*) m->addrs.vals[idx];
-    bool changed = r->have_addr && memcmp(&r->addr, u+dataoff, sizeof(r->addr));
+    bool changed = !r->have_addr || memcmp(&r->addr, u+dataoff, sizeof(r->addr));
 
-    memcpy(&r->addr, u+dataoff, sizeof(r->addr));
+	if (changed) {
+		r->have_addr = 1;
+		memcpy(&r->addr, u+dataoff, sizeof(r->addr));
+	}
     
     if (r->userid) {
         r->cb(r->udata, &r->addr);
@@ -887,34 +908,33 @@ static int process_addr(struct emdns *m, emdns_time now, struct key *k, uint8_t 
     
     if (!r->results) {
         // no one wants us any more
-        heap_remove(&m->cache_heap, &r->h.hn, &compare_record);
+		unschedule_request(m, &r->h);
         kh_del(cache, &m->addrs, idx);
         emdns_mem_free(r);
         return off;
     }
     
-    struct timeout time;
     if (ttl) {
-        time.next = now + (800 * ttl) + random_wait(0, 20 * ttl);
-        time.expiry = now + (1000 * ttl);
-        time.step = 50 * ttl;
+        r->t.next = now + (800 * ttl) + random_wait(0, 20 * ttl);
+        r->t.expiry = now + (1000 * ttl);
+        r->t.step = 50 * ttl;
     } else {
         // goaway
-        time.next = now + 1000;
-        time.expiry = now + 1000;
-        time.step = 0;
+        r->t.next = now + 1000;
+        r->t.expiry = now + 1000;
+        r->t.step = 0;
     }
 
-    schedule_request(m, &r->h, time);
+    reschedule_request(m, &r->h, r->t.next);
 
-    for (struct result *q = r->results; q != NULL; q = q->srv_next) {
-        memcpy(&q->sa.sin6_addr, &r->addr, sizeof(r->addr));
-        q->have_addr = 1;
-        if (changed) {
-            q->dirty = true;
-        }
-        publish_result(q);
-    }
+	if (changed) {
+		for (struct result *q = r->results; q != NULL; q = q->srv_next) {
+			memcpy(&q->sa.sin6_addr, &r->addr, sizeof(r->addr));
+			q->have_addr = 1;
+			q->dirty = true;
+			publish_result(q);
+		}
+	}
 
     return off;
 }
@@ -929,12 +949,13 @@ static int process_other(uint8_t *u, int sz, int off) {
 static int process_response(struct emdns *m, emdns_time now, uint8_t *u, int sz, int record_num) {
     int off = 12;
 
-    while (--record_num) {
+    while (record_num--) {
         struct key k;
         int namesz = decode_dns_name(k.name, u, sz, &off);
         if (namesz < 0 || off + 2 /*rtype*/ + 2 /*rclass*/ + 4 /*ttl*/ + 2 /*datasz*/ > sz) {
             return EMDNS_MALFORMED;
         }
+		k.namesz = (uint8_t) namesz;
         
         uint16_t rtype = big_16(u + off);
         uint16_t rclass = big_16(u + off + 2) & RCLASS_MASK;
@@ -961,7 +982,7 @@ static int process_request(struct emdns *m, emdns_time now, uint8_t *u, int sz, 
     struct pub_service *answers = NULL;
     emdns_time pub_time = now + random_wait(20, 120);
 
-    while (--question_num) {
+    while (question_num--) {
         uint8_t name[MAX_HOST_SIZE];
         int namesz = decode_dns_name(name, u, sz, &off);
         if (namesz < 0 || off + 4 > sz) {
@@ -971,7 +992,7 @@ static int process_request(struct emdns *m, emdns_time now, uint8_t *u, int sz, 
         uint16_t rtype = big_16(u + off);
         uint16_t rclass = big_16(u + off + 2);
         
-        if (rclass != RCLASS_IN || rtype > RTYPE_MAX) {
+        if (rclass != RCLASS_IN) {
             continue;
         }
 
@@ -980,7 +1001,7 @@ static int process_request(struct emdns *m, emdns_time now, uint8_t *u, int sz, 
             if (namesz == m->hostname.namesz && equals_dns_name(name, m->hostname.name)) {
                 for (int id = 0; id < MAX_IPS; id++) {
                     struct pub_ip *r = m->user_ips[id];
-                    if (now - r->h.last_publish >= 1000) {
+                    if (r && now - r->h.last_publish >= 1000) {
                         reschedule_publish(m, &r->h, pub_time);
                     }
                 }
@@ -990,7 +1011,7 @@ static int process_request(struct emdns *m, emdns_time now, uint8_t *u, int sz, 
         case RTYPE_TXT:
             for (int id = 0; id < MAX_SERVICES; id++) {
                 struct pub_service *r = m->user_services[id];
-                if (now - r->h.last_publish >= 1000 && namesz == r->name.namesz && equals_dns_name(name, r->name.name)) {
+                if (r && now - r->h.last_publish >= 1000 && namesz == r->name.namesz && equals_dns_name(name, r->name.name)) {
                     reschedule_publish(m, &r->h, pub_time);
                 }
             }
@@ -1001,7 +1022,7 @@ static int process_request(struct emdns *m, emdns_time now, uint8_t *u, int sz, 
                 uint8_t labelsz = r->name.name[0];
                 uint8_t *svc = r->name.name + 1 + labelsz;
                 uint8_t svcsz = r->name.namesz - 1 - labelsz;
-                if (now - r->h.last_publish >= 1000 && svcsz == namesz && equals_dns_name(name, svc)) {
+                if (r && now - r->h.last_publish >= 1000 && svcsz == namesz && equals_dns_name(name, svc)) {
                     // don't immediately schedule. we need to check that it's not
                     // in the known answer list
                     r->next_answer = answers;
@@ -1014,7 +1035,7 @@ static int process_request(struct emdns *m, emdns_time now, uint8_t *u, int sz, 
 
     // process known answers
     
-    while (--answer_num) {
+    while (answer_num--) {
         uint8_t svc[MAX_HOST_SIZE];
         int svcsz = decode_dns_name(svc, u, sz, &off);
         if (svcsz < 0 || off + 10 > sz) {
@@ -1037,24 +1058,32 @@ static int process_request(struct emdns *m, emdns_time now, uint8_t *u, int sz, 
         if (rclass != RCLASS_IN || rtype != RTYPE_PTR) {
             continue;
         }
-        
+
         uint8_t name[MAX_HOST_SIZE];
         int namesz = decode_dns_name(name, u, sz, &dataoff);
         if (namesz < 0 || dataoff != off) {
             return EMDNS_MALFORMED;
         }
 
+		// check that the service and name match
+		uint8_t labelsz = name[0];
+		if (namesz - 1 - labelsz != svcsz || !equals_dns_name(name + 1 + labelsz, svc)) {
+			continue;
+		}
+
         // search through the list and remove the item if it's there
         struct pub_service *prev = NULL;
         struct pub_service *r = answers;
         while (r != NULL) {
-            if (namesz != r->name.namesz || !equals_dns_name(name, r->name.name)) {
+            if (namesz == r->name.namesz && equals_dns_name(name, r->name.name)) {
+				if (prev) {
+					r = prev->next_answer = r->next_answer;
+				} else {
+					r = answers = r->next_answer;
+				}
+			} else {
                 prev = r;
                 r = r->next_answer;
-            } else if (prev) {
-                r = prev->next_answer = r->next_answer;
-            } else {
-                r = answers = r->next_answer;
             }
         }
     }
@@ -1142,25 +1171,27 @@ static int encode_result_query(const struct key *k, uint8_t *buf, int sz, int *o
     return 0;
 }
 
-static int encode_result(struct result *r, emdns_time now, uint8_t *buf, int sz, int *off) {
-    int reqsz = 2 /*name*/ + 2 /*type*/ + 2 /*class*/ + 4 /*ttl*/ + 2 /*datasz*/ + r->h.key.namesz;
+static int encode_result(struct result *r, emdns_time now, uint8_t *buf, int sz, int *off, int scanoff) {
+	uint8_t labelsz = r->h.key.name[0];
+	uint16_t datasz = 1 + labelsz + 2;
+    int reqsz = 2 /*name*/ + 2 /*type*/ + 2 /*class*/ + 4 /*ttl*/ + 2 /*datasz*/ + datasz;
     if (*off + reqsz > sz) {
         return -1;
     }
 
-    uint8_t labelsz = r->h.key.name[0];
-    uint16_t svcoff = *off + 2 /*name*/ + 2 /*type*/ + 2 /*class*/ + 4 /*ttl*/ + 2 /*datasz*/ + 1 /*labelsz*/ + labelsz; 
-    uint32_t ttl = (uint32_t) ((r->h.t.expiry - now) / 1000);
+    uint32_t ttl = (uint32_t) ((r->time_ptr.expiry - now) / 1000);
 
     uint8_t *p = buf + *off;
-    put_big_16(p, LABEL_PTR16 | svcoff);
+    put_big_16(p, LABEL_PTR16 | scanoff);
     put_big_16(p + 2, RTYPE_PTR);
     put_big_16(p + 4, RCLASS_IN);
     put_big_32(p + 6, ttl);
-    put_big_16(p + 10, r->h.key.namesz);
+    put_big_16(p + 10, datasz);
     p += 12;
-    memcpy(p, r->h.key.name, r->h.key.namesz);
-    p += r->h.key.namesz;
+    memcpy(p, r->h.key.name, 1 + labelsz);
+    p += 1 + labelsz;
+	put_big_16(p, LABEL_PTR16 | scanoff);
+	p += 2;
 
     *off += reqsz;
     assert(p - buf == *off);
@@ -1258,6 +1289,7 @@ static int get_next_publish(struct emdns *m, emdns_time *time, uint8_t *u, int s
 	for (;;) {
 		struct heap_node *hn = heap_min(&m->publish_heap);
 		if (!hn) {
+			*time = INT64_MAX;
 			break;
 		}
 
@@ -1289,13 +1321,15 @@ static int get_next_publish(struct emdns *m, emdns_time *time, uint8_t *u, int s
 
     for (int id = 0; id < MAX_IPS; id++) {
         struct pub_ip *r = m->user_ips[id];
-		if (encode_local_addr(m, r, u, sz, &off)) {
-			break;
+		if (r) {
+			if (encode_local_addr(m, r, u, sz, &off)) {
+				break;
+			}
+			if (r->h.last_publish != now) {
+				increment_publish_timeout(m, &r->h, now);
+			}
+			num_publish++;
 		}
-		if (r->h.last_publish != now) {
-			increment_publish_timeout(m, &r->h, now);
-		}
-		num_publish++;
 	}
 
 	put_big_16(u, 0); // transaction ID
@@ -1319,53 +1353,65 @@ static int get_next_request(struct emdns *m, emdns_time *time, uint8_t *u, int s
 	for (;;) {
 		struct heap_node *hn = heap_min(&m->cache_heap);
 		if (!hn) {
+			*time = INT64_MAX;
 			break;
 		}
 
-		struct record *r = container_of(hn, struct record, hn);
-		if (r->t.next > *time) {
-			*time = r->t.next;
+		struct record *h = container_of(hn, struct record, hn);
+		if (h->next > now) {
+			*time = h->next;
 			break;
         }
-        
-        if (now >= r->t.expiry) {
-            switch (r->type) {
-            case RESULT_RECORD:
-                expire_result(m, (struct result*) r);
-                break;
-            case ADDR_RECORD:
-                expire_addr(m, (struct addr*) r);
-                break;
-            case SCAN_RECORD:
-                assert(0);
-            }
-            continue;
+
+		emdns_time next;
+
+        switch (h->type) {
+        case RESULT_RECORD: {
+				struct result *r = (struct result*) h;
+				if (now >= r->time_ptr.expiry || now >= r->time_srv.expiry || now >= r->time_txt.expiry) {
+					expire_result(m, r);
+					continue;
+				}
+				if (encode_result_query(&r->h.key, u, sz, &off)) {
+					goto out_of_space;
+				}
+				emdns_time a = increment_timeout(&r->time_ptr, now);
+				emdns_time b = increment_timeout(&r->time_srv, now);
+				emdns_time c = increment_timeout(&r->time_txt, now);
+				next = min3(a,b,c);
+			}
+            break;
+        case ADDR_RECORD: {
+				struct addr *a = (struct addr*) h;
+				if (now >= a->t.expiry) {
+					expire_addr(m, a);
+					continue;
+				}
+				if (encode_query(&a->h.key, RTYPE_AAAA, u, sz, &off)) {
+					goto out_of_space;
+				}
+				next = increment_timeout(&a->t, now);
+			}
+            break;
+        case SCAN_RECORD: {
+				struct scan *s = (struct scan*) h;
+				assert(s->t.expiry == INT64_MAX);
+				s->svcoff = off;
+				if (encode_query(&s->h.key, RTYPE_PTR, u, sz, &off)) {
+					goto out_of_space;
+				}
+				// add it to our list to add known answers below
+				s->next_scan = scans;
+				scans = s;
+				next = increment_timeout(&s->t, now);
+			}
+            break;
+		default:
+			assert(0);
+			continue;
         }
 
-        switch (r->type) {
-        case RESULT_RECORD:
-            if (encode_result_query(&r->key, u, sz, &off)) {
-                goto out_of_space;
-            }
-            break;
-        case ADDR_RECORD:
-            if (encode_query(&r->key, RTYPE_AAAA, u, sz, &off)) {
-                goto out_of_space;
-            }
-            break;
-        case SCAN_RECORD:
-            if (encode_query(&r->key, RTYPE_PTR, u, sz, &off)) {
-                goto out_of_space;
-            } else {
-                // add it to our list to add known answers below
-                struct scan *s = (struct scan*) r;
-                s->next_scan = scans;
-                scans = s;
-            }
-            break;
-        }
-
-		increment_timeout(m, r, now);
+		reschedule_request(m, h, next);
 		num_questions++;
 	}
 
@@ -1373,7 +1419,7 @@ static int get_next_request(struct emdns *m, emdns_time *time, uint8_t *u, int s
     
 	for (struct scan *s = scans; s != NULL; s = s->next_scan) {
         for (struct result *r = s->results; r != NULL; r = r->scan_next) {
-            if (encode_result(r, now, u, sz, &off)) {
+            if (encode_result(r, now, u, sz, &off, s->svcoff)) {
                 goto out_of_space;
             }
             num_answers++;

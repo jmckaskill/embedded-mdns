@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../emdns.h"
+#include "../libmdns/emdns-impl.h"
 #include <inttypes.h>
 #include <string.h>
 #include <stdio.h>

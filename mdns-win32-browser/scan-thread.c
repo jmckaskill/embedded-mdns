@@ -13,14 +13,14 @@ static HWND g_window;
 static int g_interface_id;
 static HANDLE g_stop_event;
 
-static struct answer *create_answer(const char *name, size_t namesz) {
-	size_t u16len = MultiByteToWideChar(CP_UTF8, 0, name, namesz, NULL, 0);
+static struct answer *create_answer(const char *name, int namesz) {
+	int u16len = MultiByteToWideChar(CP_UTF8, 0, name, namesz, NULL, 0);
 	struct answer *ret = (struct answer*) malloc(sizeof(struct answer) * u16len * 2);
 	MultiByteToWideChar(CP_UTF8, 0, name, namesz, ret->name, u16len);
 	return ret;
 }
 
-static void service_update(void *udata, const char *name, size_t namesz, const struct sockaddr_in6 *sa, const char *txt, size_t txtsz) {
+static void service_update(void *udata, const char *name, int namesz, const struct sockaddr_in6 *sa, const char *txt, int txtsz) {
 	struct answer *a = create_answer(name, namesz);
 	if (sa) {
 		a->text = (char*) malloc(txtsz);

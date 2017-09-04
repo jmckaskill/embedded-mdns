@@ -4,7 +4,7 @@ static int my_udata;
 static int err;
 static int callback_called;
 
-static void service_callback(void *udata, const char *name, size_t namesz, const struct sockaddr_in6 *sa, const char *txt, size_t txtsz) {
+static void service_callback(void *udata, const char *name, int namesz, const struct sockaddr_in6 *sa, const char *txt, int txtsz) {
 	static const char expected_name[] = "Mr. Service";
 	static const char expected_ip[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
 	static const char expected_txt[] = "\x0bkey1=value1\x0bkey2=value2";
@@ -16,7 +16,7 @@ static void service_callback(void *udata, const char *name, size_t namesz, const
 	check_data(&err, (char*) &sa->sin6_addr, expected_ip, 16, "check service ip address");
 	check(&err, ntohs(sa->sin6_port), port, "check service port");
 	check(&err, txtsz, sizeof(expected_txt) - 1, "check text size");
-	check_data(&err, txt, expected_txt, sizeof(expected_txt), "check text data");
+	check_data(&err, txt, expected_txt, sizeof(expected_txt) - 1, "check text data");
 
 	callback_called = 1;
 }
@@ -32,7 +32,7 @@ int test_scan() {
 
 	emdns_time now = 0;
 
-	check(&err, emdns_scan_ip6(m, now, "_http._tcp.local", &my_udata, &service_callback), 0, "setup scan");
+	check_range(&err, emdns_scan_ip6(m, now, "_http._tcp.local", &my_udata, &service_callback), 0, INT_MAX, "setup scan");
 
 	static const char request_msg[] =
 		"\0\0" // transaction ID
@@ -45,12 +45,14 @@ int test_scan() {
 		"\0\x0C" // 12 - PTR record
 		"\0\x01"; // internet class - QU not set
 
-	check(&err, emdns_next(m, &now, buf, sizeof(buf)), sizeof(request_msg) - 1, "initial scan request");
+	check(&err, emdns_next(m, &now, buf, sizeof(buf)), sizeof(request_msg) - 1, "initial scan request size");
+	check_data(&err, buf, request_msg, sizeof(request_msg) - 1, "initial scan request data");
 	check(&err, emdns_next(m, &now, buf, sizeof(buf)), EMDNS_PENDING, "wait before second request");
 	check(&err, now, 1000, "send next request one second later");
 
 	now = 1000;
-	check(&err, emdns_next(m, &now, buf, sizeof(buf)), sizeof(request_msg) - 1, "second scan request");
+	check(&err, emdns_next(m, &now, buf, sizeof(buf)), sizeof(request_msg) - 1, "second scan request size");
+	check_data(&err, buf, request_msg, sizeof(request_msg) - 1, "second scan request data");
 	check(&err, emdns_next(m, &now, buf, sizeof(buf)), EMDNS_PENDING, "wait before third request");
 	check(&err, now, 3000, "send next request two seconds later");
 
