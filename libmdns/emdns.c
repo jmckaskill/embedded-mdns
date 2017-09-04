@@ -1,6 +1,10 @@
 #include "emdns-impl.h"
 #include <assert.h>
 
+#ifdef _WIN32
+// for ntohs
+#pragma comment(lib, "ws2_32.lib")
+#endif
 
 /////////////////////////////////
 // HELPERS
@@ -551,11 +555,11 @@ int emdns_query_ip6(struct emdns *m, emdns_time now, const char *name, void *uda
         }
     }
 
-    m->user_addrs[id] = a;
     a->cb = cb;
     a->udata = udata;
-    a->userid = id + ID_ADDR;
 
+    a->userid = id + ID_ADDR;
+    m->user_addrs[id] = a;
     return a->userid;
 }
 
@@ -602,9 +606,9 @@ int emdns_scan_ip6(struct emdns *m, emdns_time now, const char *name, void *udat
     m->scans.keys[idx] = &s->h.key;
     m->scans.vals[idx] = &s->h;
 
+	s->userid = id + ID_SCAN;
     m->user_scans[id] = s;
-
-    return id + ID_SCAN;
+    return s->userid;
 }
 
 static void init_publish(struct emdns *m, struct publish *p, emdns_time now, enum publish_type type) {
@@ -632,6 +636,7 @@ int emdns_publish_ip6(struct emdns *m, emdns_time now, const struct in6_addr *ad
     init_publish(m, &p->h, now, PUBLISH_AAAA);
     memcpy(&p->addr, addr, sizeof(*addr));
 
+	m->user_ips[id] = p;
     return id + ID_IP;
 }
 
@@ -1145,7 +1150,7 @@ static int encode_result(struct result *r, emdns_time now, uint8_t *buf, int sz,
 
     uint8_t labelsz = r->h.key.name[0];
     uint16_t svcoff = *off + 2 /*name*/ + 2 /*type*/ + 2 /*class*/ + 4 /*ttl*/ + 2 /*datasz*/ + 1 /*labelsz*/ + labelsz; 
-    uint32_t ttl = (r->h.t.expiry - now) / 1000;
+    uint32_t ttl = (uint32_t) ((r->h.t.expiry - now) / 1000);
 
     uint8_t *p = buf + *off;
     put_big_16(p, LABEL_PTR16 | svcoff);
@@ -1220,7 +1225,7 @@ static int encode_service(struct pub_service *s, const struct key *host, uint8_t
 	put_big_16(p + 2, RTYPE_TXT);
 	put_big_16(p + 4, RCLASS_IN_FLUSH);
 	put_big_32(p + 6, TTL_DEFAULT);
-	put_big_16(p + 10, s->txtsz);
+	put_big_16(p + 10, (uint16_t) s->txtsz);
     p += 12;
 	memcpy(p, s->txt, s->txtsz);
 	p += s->txtsz;

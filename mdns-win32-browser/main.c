@@ -6,7 +6,7 @@
 #include <commctrl.h>
 #include <assert.h>
 #include <stdio.h>
-#include <mdns.h>
+#include "../emdns.h"
 #include "scan-thread.h"
 
 #pragma comment(lib, "iphlpapi.lib")

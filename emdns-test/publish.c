@@ -11,7 +11,7 @@ int test_publish_ip6() {
 	struct in6_addr a;
 	memcpy(&a, test_addr, 16);
 	emdns_time now = 1000;
-	check(&err, emdns_publish_ip6(m, now, &a), 0, "emdns_publish_ip6 ID");
+	check_range(&err, emdns_publish_ip6(m, now, &a), 0, INT_MAX, "emdns_publish_ip6 ID");
 
 	char buf[1024];
 	now = 1000;

@@ -1,5 +1,5 @@
 #include "scan-thread.h"
-#include <mdns.h>
+#include "../emdns.h"
 #include <assert.h>
 
 #ifdef _MSC_VER
@@ -13,23 +13,18 @@ static HWND g_window;
 static int g_interface_id;
 static HANDLE g_stop_event;
 
-static struct answer *create_answer(const char *name) {
-	size_t u16len = MultiByteToWideChar(CP_UTF8, 0, name, -1, NULL, 0);
+static struct answer *create_answer(const char *name, size_t namesz) {
+	size_t u16len = MultiByteToWideChar(CP_UTF8, 0, name, namesz, NULL, 0);
 	struct answer *ret = (struct answer*) malloc(sizeof(struct answer) * u16len * 2);
-	MultiByteToWideChar(CP_UTF8, 0, name, -1, ret->name, u16len);
+	MultiByteToWideChar(CP_UTF8, 0, name, namesz, ret->name, u16len);
 	return ret;
 }
 
-static void service_update(void *udata, const char *name, const struct sockaddr_in6 *sa, const char *txt) {
-	struct answer *a = create_answer(name);
+static void service_update(void *udata, const char *name, size_t namesz, const struct sockaddr_in6 *sa, const char *txt, size_t txtsz) {
+	struct answer *a = create_answer(name, namesz);
 	if (sa) {
-		// txt is a string vector, find the end so we can copy it
-		const char *txtend = txt;
-		while (*txtend) {
-			txtend += strlen(txtend) + 1;
-		}
-		a->text = (char*) malloc(txtend - txt + 1);
-		memcpy(a->text, txt, txtend - txt + 1);
+		a->text = (char*) malloc(txtsz);
+		memcpy(a->text, txt, txtsz);
 		memcpy(&a->addr, sa, sizeof(a->addr));
 		PostMessage(g_window, MSG_ADD, (WPARAM) a, 0);
 	} else {
@@ -48,8 +43,8 @@ static DWORD WINAPI scan_thread(LPVOID param) {
 	HANDLE ev = WSACreateEvent();
 	WSAEventSelect(fd, ev, FD_READ);
 
-	struct emdns m = {0};
-	emdns_scan_ip6(&m, (emdns_time) GetTickCount64(), svc, NULL, &service_update);
+	struct emdns *m = emdns_new("");
+	emdns_scan_ip6(m, (emdns_time) GetTickCount64(), svc, NULL, &service_update);
 
 	for (;;) {
 		char buf[1024];
@@ -57,7 +52,7 @@ static DWORD WINAPI scan_thread(LPVOID param) {
 		for (;;) {
 			emdns_time now = (emdns_time) GetTickCount64();
 			emdns_time next = now;
-			int w = emdns_next(&m, &next, buf, sizeof(buf));
+			int w = emdns_next(m, &next, buf, sizeof(buf));
 			if (w == EMDNS_PENDING) {
 				timeout = (int) (next - now);
 				break;
@@ -73,7 +68,7 @@ static DWORD WINAPI scan_thread(LPVOID param) {
 				if (w < 0) {
 					break;
 				}
-				emdns_process(&m, (emdns_time) GetTickCount64(), buf, w);
+				emdns_process(m, (emdns_time) GetTickCount64(), buf, w);
 			}
 			break;
 		case WAIT_TIMEOUT:
@@ -86,6 +81,7 @@ static DWORD WINAPI scan_thread(LPVOID param) {
 end:
 	CloseHandle(ev);
 	closesocket(fd);
+	emdns_free(m);
 
 	return 0;
 }
