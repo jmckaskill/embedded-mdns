@@ -323,33 +323,19 @@ void emdns_free(struct emdns *m) {
 
 static void remove_srv(struct emdns *m, struct result *r) {
     struct addr *a = r->srv;
-    if (!a) {
-        return;
-    }
-    if (r->srv_next) {
-        r->srv_next->srv_prev = r->srv_prev;
-    }
-    if (r->srv_prev) {
-        r->srv_prev->srv_next = r->srv_next;
-    }
-    if (a->results == r) {
-        a->results = r->srv_next;
-    }
-    r->srv = NULL;
-    r->have_addr = false;
-    r->dirty = true;
-
-    if (a->results || a->cb) {
-        return;
-    }
-
-    // no one wants to watch this address anymore
-    khint_t idx = kh_get(cache, &m->addrs, &a->h.key);
-    assert(idx != kh_end(&m->addrs));
-    kh_del(cache, &m->addrs, idx);
-
-	unschedule_request(m, &a->h);
-    emdns_mem_free(a);
+    if (a) {
+		if (r->srv_next) {
+			r->srv_next->srv_prev = r->srv_prev;
+		}
+		if (r->srv_prev) {
+			r->srv_prev->srv_next = r->srv_next;
+		}
+		if (a->results == r) {
+			a->results = r->srv_next;
+		}
+		r->srv = NULL;
+		r->have_addr = false;
+	}
 }
 
 static void init_record(struct record *r, const struct key *k, enum record_type type) {
@@ -392,7 +378,6 @@ static void expire_result(struct emdns *m, struct result *r) {
         r->have_srv = false;
         r->have_ptr = false;
         r->have_txt = false;
-        r->dirty = true;
         publish_result(r);
 
         if (r->scan_next) {
@@ -422,8 +407,11 @@ static void expire_addr(struct emdns *m, struct addr *a) {
         r = rn;
     }
 
+	if (a->cb) {
+		a->cb(a->udata, NULL);
+	}
+
     if (a->userid) {
-        a->cb(a->udata, NULL);
         m->user_addrs[a->userid - ID_ADDR] = NULL;
     }
 
@@ -481,8 +469,8 @@ int emdns_stop(struct emdns *m, int userid) {
         if (!a) {
             goto err;
         }
+		a->cb = NULL;
         a->userid = 0;
-        expire_addr(m, a);
         m->user_addrs[userid - ID_ADDR] = NULL;
 
     } else {
@@ -499,7 +487,8 @@ err:
 // USER REQUESTS
 ////////////////
 
-static struct addr *create_addr(struct emdns *m, const struct key *k, emdns_time now) {
+// create_addr creates an address record, but does not schedule it
+static struct addr *create_addr(struct emdns *m, const struct key *k) {
     int res;
     khint_t idx = kh_put(cache, &m->addrs, k, &res);
     if (res <= 0) {
@@ -514,14 +503,9 @@ static struct addr *create_addr(struct emdns *m, const struct key *k, emdns_time
 
 
     init_record(&a->h, k, ADDR_RECORD);
-    a->t.next = now;
-    a->t.expiry = now + 6000;
-    a->t.step = 1000;
 
 	m->addrs.vals[idx] = &a->h;
 	m->addrs.keys[idx] = &a->h.key;
-
-    schedule_request(m, &a->h, a->t.next);
 
     return a;
 }
@@ -555,10 +539,14 @@ int emdns_query_ip6(struct emdns *m, emdns_time now, const char *name, void *uda
             return EMDNS_FINISHED;
         }
     } else {
-        a = create_addr(m, &k, now);
+        a = create_addr(m, &k);
         if (!a) {
             return EMDNS_TOO_MANY;
         }
+		a->t.next = now;
+		a->t.expiry = now + 6000;
+		a->t.step = 1000;
+		schedule_request(m, &a->h, a->t.next);
     }
 
     a->cb = cb;
@@ -662,15 +650,20 @@ static int process_srv(struct emdns *m, emdns_time now, struct result *r, struct
         khint_t pidx = kh_get(cache, &m->addrs, pk);
 
         if (pidx != kh_end(&m->addrs)) {
-            r->srv = (struct addr*) m->addrs.vals[pidx];
+            a = (struct addr*) m->addrs.vals[pidx];
         } else {
-            r->srv = create_addr(m, pk, now);
-            if (!r->srv) {
+            a = create_addr(m, pk);
+            if (!a) {
                 return -1;
             }
+			a->t.next = now;
+			a->t.expiry = now + 6000;
+			a->t.step = 1000;
+			schedule_request(m, &a->h, a->t.next);
         }
 
         // add ourselves to the result
+		r->srv = a;
         r->srv_next = r->srv->results;
         r->srv->results = r;
 
@@ -678,9 +671,12 @@ static int process_srv(struct emdns *m, emdns_time now, struct result *r, struct
             r->srv_next->srv_prev = r;
         }
 
-        r->dirty = true;
         r->have_addr = r->srv->have_addr;
-        memcpy(&r->sa.sin6_addr, &r->srv->addr, sizeof(r->srv->addr));
+
+		if (r->have_addr) {
+			memcpy(&r->sa.sin6_addr, &r->srv->addr, sizeof(r->srv->addr));
+			r->dirty = true;
+		}
     }
 
     port = ntohs(port);
@@ -800,6 +796,11 @@ static int process_result(struct emdns *m, emdns_time now, struct key *k, uint16
         r->have_ptr = true;
         break;
     case RTYPE_TXT:
+		if (datasz == 1 && u[dataoff] == 0) {
+			// DNS doesn't allow zero sized records so mDNS fakes a empty text block
+			// as a single string of zero length
+			datasz = 0;
+		}
         if (!r->have_txt || r->txtsz != datasz || memcmp(r->txt, u+dataoff, datasz)) {
             // the text data has changed
             r->dirty = true;
@@ -892,14 +893,35 @@ static int process_addr(struct emdns *m, emdns_time now, struct key *k, uint8_t 
     if (off > sz || datasz != sizeof(struct in6_addr)) {
         return EMDNS_MALFORMED;
     }
+	 
+	struct timeout t;
+    if (ttl) {
+        t.next = now + (800 * ttl) + random_wait(0, 20 * ttl);
+        t.expiry = now + (1000 * ttl);
+        t.step = 50 * ttl;
+    } else {
+        // goaway
+        t.next = now + 1000;
+        t.expiry = now + 1000;
+        t.step = 0;
+    }
+
+	struct addr *r;
 
     hash_key(k);
     khint_t idx = kh_get(cache, &m->addrs, k);
     if (idx == kh_end(&m->addrs)) {
-        return off;
+		// we don't need the address, but cache it anyways until it expires in case we get
+		// a service needing it
+		r = create_addr(m, k);
+		r->t = t;
+		schedule_request(m, &r->h, t.next);
+	} else {
+		r = (struct addr*) m->addrs.vals[idx];
+		r->t = t;
+		reschedule_request(m, &r->h, t.next);
     }
 
-    struct addr *r = (struct addr*) m->addrs.vals[idx];
     bool changed = !r->have_addr || memcmp(&r->addr, u+dataoff, sizeof(r->addr));
 
 	if (changed) {
@@ -912,27 +934,6 @@ static int process_addr(struct emdns *m, emdns_time now, struct key *k, uint8_t 
         m->user_addrs[r->userid - ID_ADDR] = NULL;
         r->userid = 0;
     }
-    
-    if (!r->results) {
-        // no one wants us any more
-		unschedule_request(m, &r->h);
-        kh_del(cache, &m->addrs, idx);
-        emdns_mem_free(r);
-        return off;
-    }
-    
-    if (ttl) {
-        r->t.next = now + (800 * ttl) + random_wait(0, 20 * ttl);
-        r->t.expiry = now + (1000 * ttl);
-        r->t.step = 50 * ttl;
-    } else {
-        // goaway
-        r->t.next = now + 1000;
-        r->t.expiry = now + 1000;
-        r->t.step = 0;
-    }
-
-    reschedule_request(m, &r->h, r->t.next);
 
 	if (changed) {
 		for (struct result *q = r->results; q != NULL; q = q->srv_next) {
@@ -1402,12 +1403,19 @@ static int get_next_request(struct emdns *m, emdns_time *time, uint8_t *u, int s
 					expire_addr(m, a);
 					continue;
 				}
-				if (encode_query(&a->h.key, RTYPE_AAAA, u, sz, &off)) {
-					goto out_of_space;
+				// only send out the query if we have an active interest
+				// otherwise wait for it to expire
+				// we'll reset the timeout if it published in process_addr
+				if (a->userid || a->results) {
+					if (encode_query(&a->h.key, RTYPE_AAAA, u, sz, &off)) {
+						goto out_of_space;
+					}
+					emdns_time next = increment_timeout(&a->t, now);
+					reschedule_request(m, &a->h, next);
+					num_questions++;
+				} else {
+					reschedule_request(m, &a->h, a->t.expiry);
 				}
-				emdns_time next = increment_timeout(&a->t, now);
-				reschedule_request(m, &a->h, next);
-				num_questions++;
 			}
             break;
         case SCAN_RECORD: {

@@ -65,7 +65,7 @@ int test_query() {
 	check(&err, callback_called, 1, "callback called");
 
 	check(&err, emdns_next(m, &now, buf, sizeof(buf)), EMDNS_PENDING, "no further sends");
-	check(&err, now, INT64_MAX, "wait is infinite");
+	check_range(&err, now, 80000, 120000, "next thing to wait for is checking the AAAA cache");
 
 	now = 3000;
 	callback_called = 0;

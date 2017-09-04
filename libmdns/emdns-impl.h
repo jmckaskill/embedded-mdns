@@ -130,7 +130,9 @@ struct record {
 	emdns_time next;
 	struct key key;
 	enum record_type type;
+#ifndef NDEBUG
 	unsigned scheduled : 1;
+#endif
 };
 
 struct result {

@@ -223,6 +223,73 @@ int test_scan() {
 	check(&err, emdns_process(m, now, response_part2, sizeof(response_part2) - 1), 0, "process part2");
 	check(&err, callback_called, 1, "callback 2 called");
 
+	static const char response_part3[] =
+		"\0\0" // transaction ID
+		"\x84\0" // flags - authoritative response
+		"\0\0" // questions
+		"\0\x01" // answers - 1 answer - the PTR record
+		"\0\0" // authority
+		"\0\x05" // additional - TXT, IN, SRV, NSEC, NSEC
+		// PTR answer
+		"\x05" "_http" "\x04" "_Tcp" "\x05" "local" "\0" // _http._tcp.local.
+		"\0\x0C" // 12 - PTR record
+		"\0\x01" // internet class - flush not set
+		"\0\0\x11\x94" // TTL - 4500 seconds
+		"\0\x09" // 9 data bytes
+		"\x06" "router" "\xC0" "\x0C" // router.<redir to ptr name>
+		// TXT additional
+		"\xC0\x28" // redir to ptr target
+		"\0\x10" // 16 - TXT record
+		"\x80\x01" // internet class with flush
+		"\0\0\x11\x94" // TTL - 4500 seconds
+		"\0\x01" // data length
+		"\0" // empty text string
+		// AAAA additional
+		"\x06" "router" "\xC0\x17" // router.<redir to .local>
+		"\0\x1C" // 28 - AAAA record
+		"\x80\x01" // internet class with flush
+		"\0\0\0\x78" // TTL - 120 seconds
+		"\0\x10" // data length
+		"\xFE\x80\0\0\0\0\0\0\x01\x02\x03\x04\x05\x06\x07\x08" // IP address
+		// SRV additional
+		"\xC0\x28" // redir to ptr target
+		"\0\x21" // 33 - SRV record
+		"\x80\x01" // internet class with flush
+		"\0\0\0\x78" // TTL - 120 seconds
+		"\0\x08" // data length
+		"\0\0" // priority - 0
+		"\0\0" // weight - 0
+		"\0\x50" // port - 80
+		"\xC0\x3E" // redir to aaaa name
+		// NSEC
+		"\xC0\x28" // redir to ptr target router._http._tcp.local
+		"\0\x2f" // 48 - NSEC record
+		"\x80\x01" // internet class with flush
+		"\0\0\x11\x94" // TTL - 4500 seconds
+		"\0\x09" // data length
+		"\xC0\x28" // next domain - ptr target
+		"\0\x05" // bit map length
+		"\0\0\x80\0\x40" // bit map with TXT & SRV set
+		// NSEC
+		"\xC0\x3e" // redir to AAAA name router.local
+		"\0\x2f" // 48 - NSEC record
+		"\x80\x01" // internet class with flush
+		"\0\0\x11\x94" // TTL - 4500 seconds
+		"\0\x08" // data length
+		"\xC0\x3e" // next domain - AAAA name
+		"\0\x04" // bit map length
+		"\0\0\0\x08"; // bit map with AAAA set
+
+	// try an actual response from my mac
+	expected_name = "router";
+	expected_ip = "\xFE\x80\0\0\0\0\0\0\x01\x02\x03\x04\x05\x06\x07\x08";
+	expected_txt = "";
+	expected_port = 80;
+
+	callback_called = 0;
+	check(&err, emdns_process(m, now, response_part3, sizeof(response_part3) - 1), 0, "process part3");
+	check(&err, callback_called, 1, "callback 3 called");
+
 	emdns_free(m);
 	return err;
 }
