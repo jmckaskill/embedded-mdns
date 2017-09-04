@@ -61,7 +61,9 @@ int test_publish_ip6() {
 		"\0\x1C" // 28 - AAAA record
 		"\0\x01"; // internet class - QU not set
 
+	// test that we correctly detect invalid messages with extra bytes at the end
 	now = 4499;
+	check(&err, emdns_process(m, now, request_msg, sizeof(request_msg)), EMDNS_MALFORMED, "detect requests with extra data");
 	check(&err, emdns_process(m, now, request_msg, sizeof(request_msg) - 1), 0, "process request shortly after send");
 	
 	// now check that we don't want to send a response

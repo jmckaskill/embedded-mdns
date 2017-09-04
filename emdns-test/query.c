@@ -69,6 +69,7 @@ int test_query() {
 
 	now = 3000;
 	callback_called = 0;
+	check(&err, emdns_process(m, now, response_msg, sizeof(response_msg)), EMDNS_MALFORMED, "detect responses with extra bytes");
 	check(&err, emdns_process(m, now, response_msg, sizeof(response_msg) - 1), 0, "process second response");
 	check(&err, callback_called, 0, "further responses are ignored");
 

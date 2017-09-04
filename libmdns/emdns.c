@@ -751,6 +751,13 @@ static int process_result(struct emdns *m, emdns_time now, struct key *k, uint16
             goto alloc_error;
         }
 
+		// make sure we use the service from the scan. the name from the
+		// incoming message may have different capatilization
+		// no need to rehash though as the hash is case insensitive
+		uint8_t labelsz = k->name[0];
+		assert(1 + labelsz + s->h.key.namesz == k->namesz);
+		memcpy(k->name + 1 + labelsz, s->h.key.name, s->h.key.namesz);
+
 		// the whole result times out if we don't see all the bits
 		// within this time frame. this is equivalent to a query for
 		// a single record
@@ -775,8 +782,8 @@ static int process_result(struct emdns *m, emdns_time now, struct key *k, uint16
     struct timeout time;
 
     if (ttl) {
-        time.next = now + random_wait(0, 20 * ttl) + (800 * ttl); // 80% of ttl + 2% random
-        time.step = 50 * ttl; // 5% of ttl
+        time.next = now + random_wait(0, 20 * ttl) + (300 * ttl); // 30% of ttl + 2% random
+        time.step = 300 * ttl; // 30% of ttl
         time.expiry = now + (1000 * ttl);
     } else {
         // goaway
@@ -974,6 +981,10 @@ static int process_response(struct emdns *m, emdns_time now, uint8_t *u, int sz,
         }
     }
 
+	if (off < sz) {
+		return EMDNS_MALFORMED;
+	}
+
     return 0;
 }
 
@@ -990,7 +1001,8 @@ static int process_request(struct emdns *m, emdns_time now, uint8_t *u, int sz, 
         }
         
         uint16_t rtype = big_16(u + off);
-        uint16_t rclass = big_16(u + off + 2);
+        uint16_t rclass = big_16(u + off + 2) & RCLASS_MASK;
+		off += 4;
         
         if (rclass != RCLASS_IN) {
             continue;
@@ -1093,6 +1105,10 @@ static int process_request(struct emdns *m, emdns_time now, uint8_t *u, int sz, 
         reschedule_publish(m, &r->h, pub_time);
     }
 
+	if (off < sz) {
+		return EMDNS_MALFORMED;
+	}
+
     return 0;
 }
 
@@ -1163,7 +1179,7 @@ static int encode_result_query(const struct key *k, uint8_t *buf, int sz, int *o
     put_big_16(p + 2, RCLASS_IN);
     put_big_16(p + 4, LABEL_PTR16 | *off);
     put_big_16(p + 6, RTYPE_TXT);
-    put_big_16(p + 7, RCLASS_IN);
+    put_big_16(p + 8, RCLASS_IN);
     p += 10;
 
     *off += reqsz;
@@ -1363,8 +1379,6 @@ static int get_next_request(struct emdns *m, emdns_time *time, uint8_t *u, int s
 			break;
         }
 
-		emdns_time next;
-
         switch (h->type) {
         case RESULT_RECORD: {
 				struct result *r = (struct result*) h;
@@ -1378,7 +1392,8 @@ static int get_next_request(struct emdns *m, emdns_time *time, uint8_t *u, int s
 				emdns_time a = increment_timeout(&r->time_ptr, now);
 				emdns_time b = increment_timeout(&r->time_srv, now);
 				emdns_time c = increment_timeout(&r->time_txt, now);
-				next = min3(a,b,c);
+				reschedule_request(m, &r->h, min3(a,b,c));
+				num_questions += 2;
 			}
             break;
         case ADDR_RECORD: {
@@ -1390,7 +1405,9 @@ static int get_next_request(struct emdns *m, emdns_time *time, uint8_t *u, int s
 				if (encode_query(&a->h.key, RTYPE_AAAA, u, sz, &off)) {
 					goto out_of_space;
 				}
-				next = increment_timeout(&a->t, now);
+				emdns_time next = increment_timeout(&a->t, now);
+				reschedule_request(m, &a->h, next);
+				num_questions++;
 			}
             break;
         case SCAN_RECORD: {
@@ -1403,26 +1420,27 @@ static int get_next_request(struct emdns *m, emdns_time *time, uint8_t *u, int s
 				// add it to our list to add known answers below
 				s->next_scan = scans;
 				scans = s;
-				next = increment_timeout(&s->t, now);
+				emdns_time next = increment_timeout(&s->t, now);
+				reschedule_request(m, &s->h, next);
+				num_questions++;
 			}
             break;
 		default:
 			assert(0);
 			continue;
         }
-
-		reschedule_request(m, h, next);
-		num_questions++;
 	}
 
 	// now add known answers for PTR scans
     
 	for (struct scan *s = scans; s != NULL; s = s->next_scan) {
         for (struct result *r = s->results; r != NULL; r = r->scan_next) {
-            if (encode_result(r, now, u, sz, &off, s->svcoff)) {
-                goto out_of_space;
-            }
-            num_answers++;
+			if (r->have_ptr) {
+				if (encode_result(r, now, u, sz, &off, s->svcoff)) {
+					goto out_of_space;
+				}
+				num_answers++;
+			}
 		}
 	}
 
