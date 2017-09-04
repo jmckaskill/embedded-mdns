@@ -294,7 +294,7 @@ static int append_ipv6(wchar_t *buf, int bufsz, struct sockaddr_in6 *sa, int int
 		p++;
 	}
 	p += swprintf(p, buf + bufsz - p, L"s%d.ipv6-literal.net", interface_id);
-	return p - buf;
+	return (int) (p - buf);
 }
 
 LRESULT CALLBACK browser_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {

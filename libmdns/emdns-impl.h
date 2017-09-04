@@ -148,6 +148,7 @@ struct result {
 	struct timeout time_srv;
 	struct timeout time_ptr;
 	struct timeout time_txt;
+	emdns_time known_timeout;
 
 	struct scan *scan;
 	struct result *scan_next, *scan_prev;

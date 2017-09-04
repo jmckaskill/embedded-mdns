@@ -14,10 +14,16 @@ static void service_callback(void *udata, const char *name, int namesz, const st
 	check(&err, (intptr_t) udata, (intptr_t) &my_udata, "correct user data in callback");
 	check(&err, namesz, strlen(expected_name), "check service name length");
 	check_data(&err, name, expected_name, strlen(expected_name), "check service name");
-	check_data(&err, (char*) &sa->sin6_addr, expected_ip, 16, "check service ip address");
-	check(&err, ntohs(sa->sin6_port), expected_port, "check service port");
-	check(&err, txtsz, strlen(expected_txt), "check text size");
-	check_data(&err, txt, expected_txt, strlen(expected_txt), "check text data");
+	if (expected_ip) {
+		check_data(&err, (char*) &sa->sin6_addr, expected_ip, 16, "check service ip address");
+		check(&err, ntohs(sa->sin6_port), expected_port, "check service port");
+		check(&err, txtsz, strlen(expected_txt), "check text size");
+		check_data(&err, txt, expected_txt, strlen(expected_txt), "check text data");
+	} else {
+		check_null(&err, sa, "check no ip given");
+		check_null(&err, txt, "check no txt given");
+		check(&err, txtsz, 0, "check txt size");
+	}
 
 	callback_called = 1;
 }
@@ -94,10 +100,10 @@ int test_scan() {
 		"\x80\x01" // internet class with flush
 		"\0\0\0\x78" // TTL - 120 seconds
 		"\0\x10" // data length
-		"\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10"; // IP address
+		"\xFE\x80\0\0\0\0\0\0\x01\x02\x03\x04\x05\x06\x07\x08"; // IP address
 
 	expected_name = "Mr. Service";
-	expected_ip = "\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10";
+	expected_ip = "\xFE\x80\0\0\0\0\0\0\x01\x02\x03\x04\x05\x06\x07\x08";
 	expected_txt = "\x0bkey1=value1\x0bkey2=value2";
 	expected_port = 12345;
 
@@ -215,7 +221,7 @@ int test_scan() {
 		"\x0B" "key3=value3" "\x0B" "key4=value4"; // txt data
 
 	expected_name = "Second.Service";
-	expected_ip = "\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10";
+	expected_ip = "\xFE\x80\0\0\0\0\0\0\x01\x02\x03\x04\x05\x06\x07\x08";
 	expected_txt = "\x0bkey3=value3\x0bkey4=value4";
 	expected_port = 9085;
 
@@ -250,7 +256,7 @@ int test_scan() {
 		"\x80\x01" // internet class with flush
 		"\0\0\0\x78" // TTL - 120 seconds
 		"\0\x10" // data length
-		"\xFE\x80\0\0\0\0\0\0\x01\x02\x03\x04\x05\x06\x07\x08" // IP address
+		"\xFE\x80\0\0\0\0\0\0\x08\x07\x06\x05\x04\x03\x02\x01" // IP address
 		// SRV additional
 		"\xC0\x28" // redir to ptr target
 		"\0\x21" // 33 - SRV record
@@ -282,13 +288,50 @@ int test_scan() {
 
 	// try an actual response from my mac
 	expected_name = "router";
-	expected_ip = "\xFE\x80\0\0\0\0\0\0\x01\x02\x03\x04\x05\x06\x07\x08";
+	expected_ip = "\xFE\x80\0\0\0\0\0\0\x08\x07\x06\x05\x04\x03\x02\x01";
 	expected_txt = "";
 	expected_port = 80;
 
 	callback_called = 0;
 	check(&err, emdns_process(m, now, response_part3, sizeof(response_part3) - 1), 0, "process part3");
 	check(&err, callback_called, 1, "callback 3 called");
+
+	static const char goaway_response[] =
+		"\0\0" // transaction ID
+		"\x84\0" // flags - authoritative response
+		"\0\0" // questions
+		"\0\x01" // answers - 1 answer - the PTR record
+		"\0\0" // authority
+		"\0\0" // additional
+		// PTR answer
+		"\x05" "_http" "\x04" "_Tcp" "\x05" "local" "\0" // _http._tcp.local.
+		"\0\x0C" // 12 - PTR record
+		"\0\x01" // internet class - flush not set
+		"\0\0\0\0" // TTL - 0 seconds
+		"\0\x09" // 9 data bytes
+		"\x06" "router" "\xC0" "\x0C"; // router.<redir to ptr name>
+
+	// make sure we handle goaway responses correctly
+
+	expected_name = "router";
+	expected_ip = NULL;
+	expected_txt = NULL;
+	expected_port = 0;
+
+	callback_called = 0;
+	now = 9000;
+	check(&err, emdns_process(m, now, goaway_response, sizeof(goaway_response) - 1), 0, "process goaway");
+	check(&err, callback_called, 0, "callback not called yet");
+	check(&err, emdns_next(m, &now, buf, sizeof(buf)), EMDNS_PENDING, "wait for goaway expiry");
+	check(&err, now, 10000, "wakeup in a second for expiry");
+
+	now = 9500;
+	check(&err, emdns_next(m, &now, buf, sizeof(buf)), EMDNS_PENDING, "wait 2 for goaway expiry");
+	check(&err, now, 10000, "wakeup in a second for expiry");
+
+	now = 10000;
+	check(&err, emdns_next(m, &now, buf, sizeof(buf)), EMDNS_PENDING, "wait for next thing");
+	check(&err, callback_called, 1, "goaway callback called");
 
 	emdns_free(m);
 	return err;

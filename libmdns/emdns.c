@@ -783,14 +783,16 @@ static int process_result(struct emdns *m, emdns_time now, struct key *k, uint16
     struct timeout time;
 
     if (ttl) {
-        time.next = now + random_wait(0, 20 * ttl) + (300 * ttl); // 30% of ttl + 2% random
-        time.step = 300 * ttl; // 30% of ttl
+        time.next = now + random_wait(0, 20 * ttl) + (800 * ttl); // 80% of ttl + 2% random
+        time.step = 50 * ttl; // 50% of ttl
         time.expiry = now + (1000 * ttl);
     } else {
         // goaway
         time.next = now + 1000;
         time.expiry = now + 1000;
         time.step = 0;
+		// when one goes away, they all do
+		r->time_ptr = r->time_srv = r->time_txt = time;
     }
     
     // decode the data and add to the result
@@ -799,6 +801,7 @@ static int process_result(struct emdns *m, emdns_time now, struct key *k, uint16
     case RTYPE_PTR:
         r->time_ptr = time;
         r->have_ptr = true;
+		r->known_timeout = now + 500 * ttl; // 50% of ttl
         break;
     case RTYPE_TXT:
 		if (datasz == 1 && u[dataoff] == 0) {
@@ -925,12 +928,9 @@ static int process_addr(struct emdns *m, emdns_time now, struct key *k, uint8_t 
 		// we don't need the address, but cache it anyways until it expires in case we get
 		// a service needing it
 		r = create_addr(m, k);
-		r->t = t;
-		schedule_request(m, &r->h, t.next);
 	} else {
 		r = (struct addr*) m->addrs.vals[idx];
-		r->t = t;
-		reschedule_request(m, &r->h, t.next);
+		unschedule_request(m, &r->h);
     }
 
     bool changed = !r->have_addr || memcmp(&r->addr, u+dataoff, sizeof(r->addr));
@@ -954,6 +954,9 @@ static int process_addr(struct emdns *m, emdns_time now, struct key *k, uint8_t 
 			publish_result(q);
 		}
 	}
+
+	r->t = t;
+	schedule_request(m, &r->h, t.next);
 
     return off;
 }
@@ -1439,15 +1442,47 @@ static int get_next_request(struct emdns *m, emdns_time *time, uint8_t *u, int s
 				if (now >= r->time_ptr.expiry || now >= r->time_srv.expiry || now >= r->time_txt.expiry) {
 					expire_result(m, r);
 					continue;
+				} 
+
+				emdns_time srv = r->time_srv.next;
+				emdns_time ptr = r->time_ptr.next;
+				emdns_time txt = r->time_txt.next;
+
+				if (now >= srv || now >= txt) {
+					if (encode_result_query(&r->h.key, u, sz, &off)) {
+						goto out_of_space;
+					}
+					if (now >= srv) {
+						srv = increment_timeout(&r->time_srv, now);
+					}
+					if (now >= txt) {
+						txt = increment_timeout(&r->time_txt, now);
+					}
+					num_questions += 2;
 				}
-				if (encode_result_query(&r->h.key, u, sz, &off)) {
-					goto out_of_space;
+
+				if (now >= r->time_ptr.next) {
+					// note: there are two cases where a scan is kicked off
+					// 1. the scan hits it's timer. 2. a result ptr hits it's timer.
+					struct scan *s = r->scan;
+					s->svcoff = off;
+					if (encode_query(&s->h.key, RTYPE_PTR, u, sz, &off)) {
+						goto out_of_space;
+					}
+					s->next_scan = scans;
+					scans = s;
+					if (now >= s->t.next) {
+						reschedule_request(m, &s->h, increment_timeout(&s->t, now));
+					}
+					ptr = increment_timeout(&r->time_ptr, now);
+					num_questions++;
+					// this result should have already got past the point where
+					// we don't include it in the known address list
+					assert(!r->have_ptr || now >= r->known_timeout);
 				}
-				emdns_time a = increment_timeout(&r->time_ptr, now);
-				emdns_time b = increment_timeout(&r->time_srv, now);
-				emdns_time c = increment_timeout(&r->time_txt, now);
-				reschedule_request(m, &r->h, min3(a,b,c));
-				num_questions += 2;
+
+				assert(ptr > now && srv > now && ptr > now);
+				reschedule_request(m, &r->h, min3(srv, txt, ptr));
 			}
             break;
         case ADDR_RECORD: {
@@ -1464,14 +1499,17 @@ static int get_next_request(struct emdns *m, emdns_time *time, uint8_t *u, int s
 						goto out_of_space;
 					}
 					emdns_time next = increment_timeout(&a->t, now);
+					assert(next > now);
 					reschedule_request(m, &a->h, next);
 					num_questions++;
 				} else {
 					reschedule_request(m, &a->h, a->t.expiry);
 				}
 			}
-            break;
-        case SCAN_RECORD: {
+			break;
+		case SCAN_RECORD: {
+				// note: there are two cases where a scan is kicked off
+				// 1. the scan hits it's timer. 2. a result ptr hits it's timer.
 				struct scan *s = (struct scan*) h;
 				assert(s->t.expiry == INT64_MAX);
 				s->svcoff = off;
@@ -1482,9 +1520,11 @@ static int get_next_request(struct emdns *m, emdns_time *time, uint8_t *u, int s
 				s->next_scan = scans;
 				scans = s;
 				emdns_time next = increment_timeout(&s->t, now);
+				assert(next > now);
 				reschedule_request(m, &s->h, next);
 				num_questions++;
 			}
+            break;
             break;
 		default:
 			assert(0);
@@ -1496,7 +1536,7 @@ static int get_next_request(struct emdns *m, emdns_time *time, uint8_t *u, int s
     
 	for (struct scan *s = scans; s != NULL; s = s->next_scan) {
         for (struct result *r = s->results; r != NULL; r = r->scan_next) {
-			if (r->have_ptr) {
+			if (r->have_ptr && now < r->known_timeout) {
 				if (encode_result(r, now, u, sz, &off, s->svcoff)) {
 					goto out_of_space;
 				}

@@ -37,14 +37,6 @@ static void service_update(void *udata, const char *name, int namesz, const stru
 	}
 }
 
-static void log(const char *fmt, ...) {
-	char buf[512];
-	va_list ap;
-	va_start(ap, fmt);
-	vsnprintf(buf, sizeof(buf), fmt, ap);
-	OutputDebugStringA(buf);
-}
-
 static DWORD WINAPI scan_thread(LPVOID param) {
 	const char *svc = (char*) param;
 	struct sockaddr_in6 send_addr;
@@ -81,7 +73,6 @@ static DWORD WINAPI scan_thread(LPVOID param) {
 				if (!WSAEnumNetworkEvents(fd, ev, &netevents) && (netevents.lNetworkEvents & FD_READ)) {
 					for (;;) {
 						int w = recv(fd, buf, sizeof(buf), 0);
-						log("recv %d\n", w);
 						if (w < 0) {
 							break;
 						}

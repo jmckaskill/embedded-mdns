@@ -5,7 +5,7 @@ static int err;
 static int callback_called;
 
 static void ip6_callback(void *udata, const struct in6_addr *addr) {
-	static const char expected_ip[16] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+	static const char expected_ip[16] = {0xFE, 0x80, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8};
 
 	check(&err, (intptr_t) udata, (intptr_t) &my_udata, "correct user data in callback");
 	check_data(&err, (char*) addr, expected_ip, 16, "check service ip address");
@@ -57,7 +57,7 @@ int test_query() {
 		"\x80\x01" // internet class with the cache bit set
 		"\0\0\0\x78" // TTL - 0x78 = 120 seconds
 		"\0\x10" // data length 16 bytes
-		"\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10"; // IP address
+		"\xFE\x80\0\0\0\0\0\0\x01\x02\x03\x04\x05\x06\x07\x08"; // IP address
 
 	now = 2000;
 	check(&err, callback_called, 0, "callback not called yet");

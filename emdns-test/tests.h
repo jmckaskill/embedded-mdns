@@ -21,12 +21,22 @@ static inline void check(int *err, int64_t have, int64_t want, const char *test)
 	}
 }
 
-static inline void check_not_null(int *err, void *have, const char *test) {
+static inline void check_not_null(int *err, const void *have, const char *test) {
 	fprintf(stderr, "  %s: ", test);
 	if (have) {
 		fprintf(stderr, "OK\n");
 	} else {
-		fprintf(stderr, "FAIL\n    Want: Not Null\n    Have: NULL\n");
+		fprintf(stderr, "FAIL\n    Want: Not NULL\n    Have: NULL\n");
+		(*err)++;
+	}
+}
+
+static inline void check_null(int *err, const void *have, const char *test) {
+	fprintf(stderr, "  %s: ", test);
+	if (!have) {
+		fprintf(stderr, "OK\n");
+	} else {
+		fprintf(stderr, "FAIL\n    Want: NULL\n    Have: %p\n", have);
 		(*err)++;
 	}
 }
