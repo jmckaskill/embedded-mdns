@@ -1,4 +1,4 @@
-#include "mdns.h"
+#include "../emdns.h"
 
 #ifndef _WIN32
 #include <sys/socket.h>
@@ -6,7 +6,7 @@
 #include <string.h>
 #include <unistd.h>
 
-int emdns_bind6(int interface_id) {
+int emdns_bind6(int interface_id, struct sockaddr_in6* send_addr) {
 	int fd = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
 	if (fd < 0) {
 		return -1;
@@ -24,7 +24,6 @@ int emdns_bind6(int interface_id) {
 		goto err;
     }
     
-
 	unsigned char addr[16] = {0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFB};
 	struct ipv6_mreq req = {0};
 	req.ipv6mr_interface = interface_id;
@@ -42,12 +41,9 @@ int emdns_bind6(int interface_id) {
 		goto err;
 	}
 
-	memcpy(&sa.sin6_addr, addr, sizeof(addr));
-	sa.sin6_scope_id = interface_id;
-
-	if (connect(fd, (struct sockaddr*) &sa, sizeof(sa))) {
-		goto err;
-	}
+	send_addr->sin6_family = AF_INET6;
+	memcpy(&send_addr->sin6_addr, addr, sizeof(addr));
+	send_addr->sin6_port = ntohs(5353);
 
 	return fd;
 

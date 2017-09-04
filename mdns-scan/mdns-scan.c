@@ -11,7 +11,7 @@
 #define closesocket(fd) close(fd)
 #endif
 
-#include "mdns.h"
+#include "../emdns.h"
 #include <stdio.h>
 
 int main(int argc, char *argv[]) {
@@ -32,13 +32,14 @@ int main(int argc, char *argv[]) {
 	struct sockaddr_in6 send_addr;
 	int fd = emdns_bind6(interface_id, &send_addr);
 
-	struct emdns m = {0};
+	struct emdns *m = emdns_new("");
 	//emdns_scan(&m, 0, MDNS_AAAA, argv[2], NULL, NULL, NULL);
 
 	char buf[512];
-	int w = emdns_next(&m, NULL, buf, sizeof(buf));
+	int w = emdns_next(m, NULL, buf, sizeof(buf));
 	sendto(fd, buf, w, 0, (struct sockaddr*) &send_addr, sizeof(send_addr));
 
+	emdns_free(m);
 	closesocket(fd);
 
 	return 0;

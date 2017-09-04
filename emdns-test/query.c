@@ -19,10 +19,11 @@ int test_query() {
 	callback_called = 0;
 	fprintf(stderr, "test_query\n");
 
-	struct emdns m = {0};
+	struct emdns *m = emdns_new("");
+	check_not_null(&err, m, "new emdns");
 
 	emdns_time now = 0;
-	check(&err, emdns_query_ip6(&m, now, "test.local", &my_udata, &ip6_callback), 0, "add ip6 query");
+	check(&err, emdns_query_ip6(m, now, "test.local", &my_udata, &ip6_callback), 0, "add ip6 query");
 
 	static const char request_msg[] =
 		"\0\0" // transaction ID
@@ -35,13 +36,13 @@ int test_query() {
 		"\0\x1C" // 28 - AAAA record
 		"\0\x01"; // internet class - QU not set
 
-	check(&err, emdns_next(&m, &now, buf, sizeof(buf)), sizeof(request_msg) - 1, "query message size");
+	check(&err, emdns_next(m, &now, buf, sizeof(buf)), sizeof(request_msg) - 1, "query message size");
 	check_data(&err, buf, request_msg, sizeof(request_msg) - 1, "query message data");
-	check(&err, emdns_next(&m, &now, buf, sizeof(buf)), EMDNS_PENDING, "wait to send next query");
+	check(&err, emdns_next(m, &now, buf, sizeof(buf)), EMDNS_PENDING, "wait to send next query");
 	check(&err, now, 1000, "next query is a second later");
 
 	now = 1000;
-	check(&err, emdns_next(&m, &now, buf, sizeof(buf)), sizeof(request_msg) - 1, "next query size");
+	check(&err, emdns_next(m, &now, buf, sizeof(buf)), sizeof(request_msg) - 1, "next query size");
 	check_data(&err, buf, request_msg, sizeof(request_msg) - 1, "next query data");
 
 	static const char response_msg[] = 
@@ -60,16 +61,17 @@ int test_query() {
 
 	now = 2000;
 	check(&err, callback_called, 0, "callback not called yet");
-	check(&err, emdns_process(&m, now, response_msg, sizeof(response_msg) - 1), 0, "process response");
+	check(&err, emdns_process(m, now, response_msg, sizeof(response_msg) - 1), 0, "process response");
 	check(&err, callback_called, 1, "callback called");
 
-	check(&err, emdns_next(&m, &now, buf, sizeof(buf)), EMDNS_PENDING, "no further sends");
+	check(&err, emdns_next(m, &now, buf, sizeof(buf)), EMDNS_PENDING, "no further sends");
 	check(&err, now, INT64_MAX, "wait is infinite");
 
 	now = 3000;
 	callback_called = 0;
-	check(&err, emdns_process(&m, now, response_msg, sizeof(response_msg) - 1), 0, "process second response");
+	check(&err, emdns_process(m, now, response_msg, sizeof(response_msg) - 1), 0, "process second response");
 	check(&err, callback_called, 0, "further responses are ignored");
 
+	emdns_free(m);
 	return err;
 }

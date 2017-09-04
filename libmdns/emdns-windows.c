@@ -1,4 +1,4 @@
-#include "mdns.h"
+#include "../emdns.h"
 #ifdef _WIN32
 
 #include <winsock2.h>
