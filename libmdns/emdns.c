@@ -241,6 +241,7 @@ static void reschedule_request(struct emdns *m, struct record *r, emdns_time nex
 }
 
 static emdns_time increment_timeout(struct timeout *t, emdns_time now) {
+	assert(t->step != 0);
     t->next = now + t->step;
     if (t->next > t->expiry) {
         t->next = t->expiry;
@@ -897,6 +898,12 @@ static int process_addr(struct emdns *m, emdns_time now, struct key *k, uint8_t 
     if (off > sz || datasz != sizeof(struct in6_addr)) {
         return EMDNS_MALFORMED;
     }
+
+	// we only care about link local addresses
+	static const uint8_t link_local[8] = {0xFE, 0x80, 0, 0, 0, 0, 0, 0};
+	if (memcmp(link_local, u+dataoff, sizeof(link_local))) {
+		return off;
+	}
 	 
 	struct timeout t;
     if (ttl) {
@@ -1037,15 +1044,17 @@ static int process_request(struct emdns *m, emdns_time now, uint8_t *u, int sz, 
         case RTYPE_PTR:
             for (int id = 0; id < MAX_SERVICES; id++) {
                 struct pub_service *r = m->user_services[id];
-                uint8_t labelsz = r->name.name[0];
-                uint8_t *svc = r->name.name + 1 + labelsz;
-                uint8_t svcsz = r->name.namesz - 1 - labelsz;
-                if (r && now - r->h.last_publish >= 1000 && svcsz == namesz && equals_dns_name(name, svc)) {
-                    // don't immediately schedule. we need to check that it's not
-                    // in the known answer list
-                    r->next_answer = answers;
-                    answers = r;
-                }
+				if (r) {
+					uint8_t labelsz = r->name.name[0];
+					uint8_t *svc = r->name.name + 1 + labelsz;
+					uint8_t svcsz = r->name.namesz - 1 - labelsz;
+					if (now - r->h.last_publish >= 1000 && svcsz == namesz && equals_dns_name(name, svc)) {
+						// don't immediately schedule. we need to check that it's not
+						// in the known answer list
+						r->next_answer = answers;
+						answers = r;
+					}
+				}
             }
             break;
         }

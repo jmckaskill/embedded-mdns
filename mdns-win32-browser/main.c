@@ -6,6 +6,8 @@
 #include <commctrl.h>
 #include <assert.h>
 #include <stdio.h>
+#include <fcntl.h>
+#include <io.h>
 #include "../emdns.h"
 #include "scan-thread.h"
 
@@ -23,6 +25,7 @@ static struct text STR_OPEN = {L"Open", L"Öffnen"};
 static struct text STR_IP = {L"IP", L"IP"};
 static struct text STR_PORT = {L"Port", L"Port"};
 static struct text STR_WEB_UI = {L"Web UI (_http._tcp)", L"Web UI (_http._tcp)"};
+static struct text STR_SSH = {L"SSH (_ssh._tcp)", L"SSH (_ssh._tcp)"};
 static struct text STR_ERROR = {L"Error", L"Error"};
 static struct text STR_NO_INTERFACES = {L"No valid interfaces found", L"No valid interfaces found"};
 
@@ -83,6 +86,23 @@ struct control {
 
 #define MAX_INTERFACES 16
 
+enum service_type {
+	HTTP,
+	SSH,
+	NUM_SERVICES,
+};
+
+struct service {
+	struct text *text;
+	const char *svcname;
+};
+
+static const struct service g_services[] = {
+	{&STR_WEB_UI, "_http._tcp.local"},
+	{&STR_SSH, "_ssh._tcp.local"},
+};
+
+
 struct mdns_browser {
 	HWND window;
 	HINSTANCE instance;
@@ -97,6 +117,8 @@ struct mdns_browser {
 	struct control combo_service;
 	struct control combo_interface;
 	
+	enum service_type cur_service;
+	int cur_interface_id;
 	int interface_num;
 	int interface_ids[MAX_INTERFACES];
 };
@@ -251,23 +273,28 @@ static void lookup_interfaces(struct mdns_browser *b) {
 	free(buf);
 }
 
-struct service {
-	struct text *text;
-	const char *svcname;
-};
-
-static const struct service g_services[] = {
-	{&STR_WEB_UI, "_http._tcp.local"}
-};
-
 static void add_services(struct mdns_browser *b) {
-	for (size_t i = 0; i < sizeof(g_services) / sizeof(g_services[0]); i++) {
+	for (int i = 0; i < NUM_SERVICES; i++) {
 		ComboBox_AddString(b->combo_service.h, get_text(g_services[i].text));
 	}
 }
 
 static void create_control(struct mdns_browser *b, struct control *c, LPCWSTR ClassName, LPCWSTR Text, DWORD style, int idc) {
 	c->h = CreateWindowW(ClassName, Text, style | WS_CHILD, c->x, c->y, c->cx, c->cy, b->window, (HMENU) (uintptr_t) idc, b->instance, NULL);
+}
+
+static int append_ipv6(wchar_t *buf, int bufsz, struct sockaddr_in6 *sa, int interface_id) {
+	InetNtopW(AF_INET6, &sa->sin6_addr, buf, bufsz);
+	// now convert to UNC version, replace : with -
+	wchar_t *p = buf;
+	while (*p) {
+		if (*p == ':') {
+			*p = '-';
+		}
+		p++;
+	}
+	p += swprintf(p, buf + bufsz - p, L"s%d.ipv6-literal.net", interface_id);
+	return p - buf;
 }
 
 LRESULT CALLBACK browser_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
@@ -310,18 +337,70 @@ LRESULT CALLBACK browser_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
 
 		ComboBox_SetCurSel(b.combo_interface.h, 0);
 		ComboBox_SetCurSel(b.combo_service.h, 0);
-		start_scan_thread(b.window, b.interface_ids[0], g_services[0].svcname);
+		b.cur_interface_id = b.interface_ids[0];
+		b.cur_service = (enum service_type) 0;
+		start_scan_thread(b.window, b.cur_interface_id, g_services[b.cur_service].svcname);
 		break;
 	}
 	case WM_COMMAND:
-		if (HIWORD(wparam) == BN_CLICKED && LOWORD(wparam) == IDC_OPEN) {
+		if (HIWORD(wparam) == LBN_SELCHANGE && LOWORD(wparam) == IDC_LIST) {
+			int idx = ListBox_GetCurSel(b.list_nodes.h);
+			struct answer *a = (struct answer*) ListBox_GetItemData(b.list_nodes.h, idx);
 
-		} else if (HIWORD(wparam) == CBN_SELCHANGE) {
+			wchar_t buf[512];
+			InetNtopW(AF_INET6, &a->addr.sin6_addr, buf,sizeof(buf));
+			size_t sz = wcslen(buf);
+			swprintf(buf + sz, sizeof(buf) - sz, L"%%%d", b.cur_interface_id);
+			SetWindowTextW(b.static_ip.h, buf);
+
+			swprintf(buf, sizeof(buf), L"%d", ntohs(a->addr.sin6_port));
+			SetWindowTextW(b.static_port.h, buf);
+
+		} else if ((HIWORD(wparam) == LBN_DBLCLK && LOWORD(wparam) == IDC_LIST) || (HIWORD(wparam) == BN_CLICKED && LOWORD(wparam) == IDC_OPEN)) {
+			int idx = ListBox_GetCurSel(b.list_nodes.h);
+			struct answer *a = (struct answer*) ListBox_GetItemData(b.list_nodes.h, idx);
+			assert(a != NULL);
+			wchar_t buf[512];
+			int sz = 0;
+			uint16_t port = ntohs(a->addr.sin6_port);
+
+			switch (b.cur_service) {
+			case HTTP:
+				sz += swprintf(buf+sz, sizeof(buf)-sz, L"http://");
+				sz += append_ipv6(buf+sz, sizeof(buf)-sz, &a->addr, b.cur_interface_id);
+				if (port != 80) {
+					sz += swprintf(buf+sz, sizeof(buf)-sz, L":%d", port);
+				}
+				ShellExecuteW(b.window, NULL, buf, NULL, NULL, SW_SHOW);
+				break;
+			case SSH:
+				sz += swprintf(buf+sz, sizeof(buf)-sz, L"-ssh ");
+				if (port != 22) {
+					sz += swprintf(buf+sz, sizeof(buf)-sz, L"-P %d ", port);
+				}
+				sz += append_ipv6(buf+sz, sizeof(buf)-sz, &a->addr, b.cur_interface_id);
+				ShellExecuteW(b.window, NULL, L"C:\\Program Files\\PuTTY\\putty.exe", buf, NULL, SW_SHOW);
+				break;
+			default:
+				break;
+			}
+			
+		} else if (HIWORD(wparam) == CBN_SELCHANGE && (LOWORD(wparam) == IDC_INTERFACE || LOWORD(wparam) == IDC_SERVICE)) {
 			stop_scan_thread();
+			int num = ListBox_GetCount(b.list_nodes.h);
+			for (int i = 0; i < num; i++) {
+				struct answer *a = (struct answer*) ListBox_GetItemData(b.list_nodes.h, i);
+				free(a->text);
+				free(a);
+			}
+			ListBox_ResetContent(b.list_nodes.h);
+
 			int ifidx = ComboBox_GetCurSel(b.combo_interface.h);
 			assert(ifidx < b.interface_num);
 			int svcidx = ComboBox_GetCurSel(b.combo_service.h);
-			start_scan_thread(b.window, b.interface_ids[ifidx], g_services[svcidx].svcname);
+			b.cur_interface_id = b.interface_ids[ifidx];
+			b.cur_service = (enum service_type) svcidx;
+			start_scan_thread(b.window, b.cur_interface_id, g_services[b.cur_service].svcname);
 		}
 		break;
 	case WM_SIZE:
@@ -332,15 +411,17 @@ LRESULT CALLBACK browser_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
 		break;
 	case MSG_ADD: {
 		struct answer *a = (struct answer*) wparam;
-		ListBox_AddString(b.list_nodes.h, a->name);
-		free(a->text);
-		free(a);
+		int idx = ListBox_AddString(b.list_nodes.h, a->name);
+		ListBox_SetItemData(b.list_nodes.h, idx, a);
 		break;
 	}
 	case MSG_REMOVE: {
 		struct answer *a = (struct answer*) wparam;
 		int idx = ListBox_FindString(b.list_nodes.h, 0, a->name);
 		if (idx != LB_ERR) {
+			struct answer *a = (struct answer*) ListBox_GetItemData(b.list_nodes.h, idx);
+			free(a->text);
+			free(a);
 			ListBox_DeleteString(b.list_nodes.h, idx);
 		}
 		free(a);
@@ -361,7 +442,7 @@ int WINAPI wWinMain(HINSTANCE hinst, HINSTANCE previnst, PWSTR cmdline, int nCmd
 	wc.hCursor = LoadCursor(0, IDC_ARROW);
 	RegisterClassW(&wc);
 
-	CreateWindowW(wc.lpszClassName, get_text(&STR_TITLE), WS_OVERLAPPEDWINDOW | WS_VISIBLE, 100, 100, 800, 600, NULL, 0, hinst, NULL);
+	CreateWindowW(wc.lpszClassName, get_text(&STR_TITLE), WS_OVERLAPPEDWINDOW | WS_VISIBLE, 100, 100, 400, 300, NULL, 0, hinst, NULL);
 
 	MSG msg;
 	while (GetMessageW(&msg, NULL, 0, 0)) {

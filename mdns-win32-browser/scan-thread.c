@@ -1,6 +1,8 @@
 #include "scan-thread.h"
 #include "../emdns.h"
 #include <assert.h>
+#include <stdio.h>
+#include <stdarg.h>
 
 #ifdef _MSC_VER
 #define strdup(a) _strdup(a)
@@ -15,21 +17,32 @@ static HANDLE g_stop_event;
 
 static struct answer *create_answer(const char *name, int namesz) {
 	int u16len = MultiByteToWideChar(CP_UTF8, 0, name, namesz, NULL, 0);
-	struct answer *ret = (struct answer*) malloc(sizeof(struct answer) * u16len * 2);
+	struct answer *ret = (struct answer*) malloc(sizeof(struct answer) * (u16len+1) * 2);
 	MultiByteToWideChar(CP_UTF8, 0, name, namesz, ret->name, u16len);
+	ret->name[u16len] = L'\0';
+	ret->text = NULL;
 	return ret;
 }
 
 static void service_update(void *udata, const char *name, int namesz, const struct sockaddr_in6 *sa, const char *txt, int txtsz) {
 	struct answer *a = create_answer(name, namesz);
 	if (sa) {
-		a->text = (char*) malloc(txtsz);
+		a->text = (char*) malloc(txtsz+1);
 		memcpy(a->text, txt, txtsz);
+		a->text[txtsz] = '\0';
 		memcpy(&a->addr, sa, sizeof(a->addr));
 		PostMessage(g_window, MSG_ADD, (WPARAM) a, 0);
 	} else {
 		PostMessage(g_window, MSG_REMOVE, (WPARAM) a, 0);
 	}
+}
+
+static void log(const char *fmt, ...) {
+	char buf[512];
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, ap);
+	OutputDebugStringA(buf);
 }
 
 static DWORD WINAPI scan_thread(LPVOID param) {
@@ -61,14 +74,20 @@ static DWORD WINAPI scan_thread(LPVOID param) {
 		}
 
 		HANDLE events[2] = {ev, g_stop_event};
-		switch (WaitForMultipleObjects(2, events, FALSE, timeout)) {
-		case WAIT_OBJECT_0:
-			for (;;) {
-				int w = recv(fd, buf, sizeof(buf), 0);
-				if (w < 0) {
-					break;
+		DWORD ret = WSAWaitForMultipleEvents(2, events, FALSE, timeout, FALSE);
+		switch (ret) {
+		case WAIT_OBJECT_0: {
+				WSANETWORKEVENTS netevents;
+				if (!WSAEnumNetworkEvents(fd, ev, &netevents) && (netevents.lNetworkEvents & FD_READ)) {
+					for (;;) {
+						int w = recv(fd, buf, sizeof(buf), 0);
+						log("recv %d\n", w);
+						if (w < 0) {
+							break;
+						}
+						emdns_process(m, (emdns_time) GetTickCount64(), buf, w);
+					}
 				}
-				emdns_process(m, (emdns_time) GetTickCount64(), buf, w);
 			}
 			break;
 		case WAIT_TIMEOUT:
