@@ -365,7 +365,13 @@ static void publish_result(struct result *r) {
     }
 
     if (all && (!r->published || r->dirty)) {
-        r->scan->cb(r->scan->udata, label, labelsz, &r->sa, r->txt, r->txtsz);
+        struct addr *a = r->srv;
+        if (a->sa.h.sa_family == AF_INET) {
+            a->sa.ip4.sin_port = htons(r->port);
+        } else {
+            a->sa.ip6.sin6_port = htons(r->port);
+        }
+        r->scan->cb(r->scan->udata, label, labelsz, &r->srv->sa.h, r->txt, r->txtsz);
         r->published = true;
     }
 
@@ -511,7 +517,7 @@ static struct addr *create_addr(struct emdns *m, const struct key *k) {
     return a;
 }
 
-int emdns_query_ip6(struct emdns *m, emdns_time now, const char *name, void *udata, emdns_ip6cb cb) {
+int emdns_query(struct emdns *m, emdns_time now, const char *name, void *udata, emdns_query_cb cb) {
     struct key k;
     int keysz = encode_dns_name(k.name, name);
     if (keysz < 0) {
@@ -536,7 +542,7 @@ int emdns_query_ip6(struct emdns *m, emdns_time now, const char *name, void *uda
         if (a->cb) {
             return EMDNS_DUPLICATE;
         } else if (a->have_addr) {
-            cb(udata, &a->addr);
+            cb(udata, &a->sa.h);
             return EMDNS_FINISHED;
         }
     } else {
@@ -558,7 +564,7 @@ int emdns_query_ip6(struct emdns *m, emdns_time now, const char *name, void *uda
     return a->userid;
 }
 
-int emdns_scan_ip6(struct emdns *m, emdns_time now, const char *name, void *udata, emdns_svccb cb) {
+int emdns_scan(struct emdns *m, emdns_time now, const char *name, void *udata, emdns_scan_cb cb) {
     struct key k;
     int keysz = encode_dns_name(k.name, name);
     if (keysz < 0) {
@@ -679,15 +685,13 @@ static int process_srv(struct emdns *m, emdns_time now, struct result *r, struct
         r->have_addr = r->srv->have_addr;
 
 		if (r->have_addr) {
-			memcpy(&r->sa.sin6_addr, &r->srv->addr, sizeof(r->srv->addr));
 			r->dirty = true;
 		}
     }
 
-    port = ntohs(port);
-    if (!r->have_srv || r->sa.sin6_port != port) {
-        r->dirty = true; // we've changed port
-        r->sa.sin6_port = port;
+    if (!r->have_srv || r->port != port) {
+        r->dirty = true;
+        r->port = port;
     }
 
     return 0;
@@ -769,7 +773,6 @@ static int process_result(struct emdns *m, emdns_time now, struct key *k, uint16
         
         // init result
         init_record(&r->h, k, RESULT_RECORD);
-        r->sa.sin6_family = AF_INET6;
 		r->time_srv = timeout;
 		r->time_ptr = timeout;
 		r->time_txt = timeout;
@@ -892,21 +895,52 @@ data_error:
     return EMDNS_MALFORMED;
 }
 
-static int process_addr(struct emdns *m, emdns_time now, struct key *k, uint8_t *u, int sz, int off) {
+static enum addr_type categorize_address(uint8_t rtype, uint8_t *data, int datasz) {
+    switch (rtype) {
+    case RTYPE_A:
+        if (datasz == sizeof(struct in_addr)) {
+            if (data[0] == 169 && data[1] == 254) {
+                return LINK_LOCAL_IP4;
+            } else if (data[0] < 224) {
+                return GLOBAL_IP4;
+            }
+        }
+        break;
+    case RTYPE_AAAA:
+        if (datasz == sizeof(struct in6_addr)) {
+            if (data[0] == 0xFE && (data[1] & 0xC0) == 0x80) {
+                // FE80::/10
+                return LINK_LOCAL_IP6;
+
+            } else if ((data[0] & 0xFE) == 0xFC) {
+                // FC00::/7
+                return SITE_LOCAL_IP6;
+
+            } else if ((data[0] & 0xE0) == 0x20) {
+                // 2000::/3
+                return GLOBAL_IP6;
+            }
+        }
+        break;
+    }
+
+    return INVALID_ADDRESS;
+}
+
+static int process_addr(struct emdns *m, emdns_time now, struct key *k, uint8_t rtype, uint8_t *u, int sz, int off) {
     int ttl = get_ttl(u + off);
     uint16_t datasz = big_16(u + off + 4);
     int dataoff = off + 6;
     off = dataoff + datasz;
 
-    if (off > sz || datasz != sizeof(struct in6_addr)) {
+    if (off > sz) {
         return EMDNS_MALFORMED;
     }
 
-	// we only care about link local addresses
-	static const uint8_t link_local[8] = {0xFE, 0x80, 0, 0, 0, 0, 0, 0};
-	if (memcmp(link_local, u+dataoff, sizeof(link_local))) {
-		return off;
-	}
+    enum addr_type atype = categorize_address(rtype, u+dataoff, datasz);
+    if (!atype) {
+        return off;
+    }
 	 
 	struct timeout t;
     if (ttl) {
@@ -929,36 +963,54 @@ static int process_addr(struct emdns *m, emdns_time now, struct key *k, uint8_t 
 		// a service needing it
 		r = create_addr(m, k);
 	} else {
-		r = (struct addr*) m->addrs.vals[idx];
+        r = (struct addr*) m->addrs.vals[idx];
+        if (atype < r->addr_type) {
+            return off;
+        }
 		unschedule_request(m, &r->h);
     }
 
-    bool changed = !r->have_addr || memcmp(&r->addr, u+dataoff, sizeof(r->addr));
+    void *dst = (rtype == RTYPE_A) ? (void*) &r->sa.ip4.sin_addr : (void*) &r->sa.ip6.sin6_addr;
+
+    bool changed = !r->have_addr 
+        || r->addr_type != atype 
+        || memcmp(dst, u+dataoff, datasz);
 
 	if (changed) {
+        r->addr_type = atype;
 		r->have_addr = 1;
-		memcpy(&r->addr, u+dataoff, sizeof(r->addr));
-	}
-    
-    if (r->userid) {
-        r->cb(r->udata, &r->addr);
-        m->user_addrs[r->userid - ID_ADDR] = NULL;
-        r->userid = 0;
-    }
+        memcpy(dst, u+dataoff, datasz);
+        r->sa.h.sa_family = (rtype == RTYPE_A) ? AF_INET : AF_INET6;
 
-	if (changed) {
-		for (struct result *q = r->results; q != NULL; q = q->srv_next) {
-			memcpy(&q->sa.sin6_addr, &r->addr, sizeof(r->addr));
-			q->have_addr = 1;
-			q->dirty = true;
-			publish_result(q);
-		}
+        // add the address to the list to be distributed at the end of the current process loop
+        // that way we find out the highest priority address before calling the callback
+        if (!r->in_list) {
+            r->in_list = true;
+            r->next = m->dist_addrs;
+            m->dist_addrs = r;
+        }
 	}
 
 	r->t = t;
 	schedule_request(m, &r->h, t.next);
 
     return off;
+}
+
+static void distribute_address(struct emdns *m, struct addr *r) {
+    if (r->userid) {
+        r->cb(r->udata, &r->sa.h);
+        m->user_addrs[r->userid - ID_ADDR] = NULL;
+        r->userid = 0;
+    }
+
+    for (struct result *q = r->results; q != NULL; q = q->srv_next) {
+        q->have_addr = 1;
+        q->dirty = true;
+        publish_result(q);
+    }
+
+    r->in_list = false;
 }
 
 static int process_other(uint8_t *u, int sz, int off) {
@@ -970,6 +1022,8 @@ static int process_other(uint8_t *u, int sz, int off) {
 
 static int process_response(struct emdns *m, emdns_time now, uint8_t *u, int sz, int record_num) {
     int off = 12;
+
+    m->dist_addrs = NULL;
 
     while (record_num--) {
         struct key k;
@@ -983,8 +1037,8 @@ static int process_response(struct emdns *m, emdns_time now, uint8_t *u, int sz,
         uint16_t rclass = big_16(u + off + 2) & RCLASS_MASK;
         off += 4;
 
-        if (rclass == RCLASS_IN && rtype == RTYPE_AAAA) {
-            off = process_addr(m, now, &k, u, sz, off);
+        if (rclass == RCLASS_IN && (rtype == RTYPE_AAAA || rtype == RTYPE_A)) {
+            off = process_addr(m, now, &k, rtype, u, sz, off);
         } else if (rclass == RCLASS_IN && (rtype == RTYPE_PTR || rtype == RTYPE_SRV || rtype == RTYPE_TXT)) {
             off = process_result(m, now, &k, rtype, u, sz, off);
         } else {
@@ -994,6 +1048,10 @@ static int process_response(struct emdns *m, emdns_time now, uint8_t *u, int sz,
         if (off < 0) {
             return off;
         }
+    }
+
+    for (struct addr *r = m->dist_addrs; r != NULL; r = r->next) {
+        distribute_address(m, r);
     }
 
 	if (off < sz) {
@@ -1184,7 +1242,7 @@ static int encode_query(const struct key *k, uint8_t rtype, uint8_t *buf, int sz
     return 0;
 }
 
-static int encode_result_query(const struct key *k, uint8_t *buf, int sz, int *off) {
+static int encode_dual_query(const struct key *k, uint8_t rtype1, uint8_t rtype2, uint8_t *buf, int sz, int *off) {
     int reqsz = 10 + k->namesz;
     if (*off + reqsz > sz) {
         return -1;
@@ -1193,10 +1251,10 @@ static int encode_result_query(const struct key *k, uint8_t *buf, int sz, int *o
     uint8_t *p = buf + *off;
     memcpy(p, k->name, k->namesz);
 	p += k->namesz;
-	put_big_16(p, RTYPE_SRV);
+	put_big_16(p, rtype1);
     put_big_16(p + 2, RCLASS_IN);
     put_big_16(p + 4, LABEL_PTR16 | *off);
-    put_big_16(p + 6, RTYPE_TXT);
+    put_big_16(p + 6, rtype2);
     put_big_16(p + 8, RCLASS_IN);
     p += 10;
 
@@ -1449,7 +1507,7 @@ static int get_next_request(struct emdns *m, emdns_time *time, uint8_t *u, int s
 				emdns_time txt = r->time_txt.next;
 
 				if (now >= srv || now >= txt) {
-					if (encode_result_query(&r->h.key, u, sz, &off)) {
+					if (encode_dual_query(&r->h.key, RTYPE_SRV, RTYPE_TXT, u, sz, &off)) {
 						goto out_of_space;
 					}
 					if (now >= srv) {
@@ -1495,7 +1553,7 @@ static int get_next_request(struct emdns *m, emdns_time *time, uint8_t *u, int s
 				// otherwise wait for it to expire
 				// we'll reset the timeout if it published in process_addr
 				if (a->userid || a->results) {
-					if (encode_query(&a->h.key, RTYPE_AAAA, u, sz, &off)) {
+					if (encode_dual_query(&a->h.key, RTYPE_AAAA, RTYPE_A, u, sz, &off)) {
 						goto out_of_space;
 					}
 					emdns_time next = increment_timeout(&a->t, now);

@@ -9,14 +9,16 @@ static const char *expected_ip;
 static const char *expected_txt;
 static uint16_t expected_port;
 
-static void service_callback(void *udata, const char *name, int namesz, const struct sockaddr_in6 *sa, const char *txt, int txtsz) {
+static void service_callback(void *udata, const char *name, int namesz, const struct sockaddr *sa, const char *txt, int txtsz) {
+	struct sockaddr_in6 *sa6 = (struct sockaddr_in6*) sa;
 	
 	check(&err, (intptr_t) udata, (intptr_t) &my_udata, "correct user data in callback");
 	check(&err, namesz, strlen(expected_name), "check service name length");
 	check_data(&err, name, expected_name, strlen(expected_name), "check service name");
 	if (expected_ip) {
-		check_data(&err, (char*) &sa->sin6_addr, expected_ip, 16, "check service ip address");
-		check(&err, ntohs(sa->sin6_port), expected_port, "check service port");
+		check(&err, sa->sa_family, AF_INET6, "check ipv6");
+		check_data(&err, (char*) &sa6->sin6_addr, expected_ip, 16, "check service ip address");
+		check(&err, ntohs(sa6->sin6_port), expected_port, "check service port");
 		check(&err, txtsz, strlen(expected_txt), "check text size");
 		check_data(&err, txt, expected_txt, strlen(expected_txt), "check text data");
 	} else {
@@ -39,7 +41,7 @@ int test_scan() {
 
 	emdns_time now = 0;
 
-	check_range(&err, emdns_scan_ip6(m, now, "_http._tcp.local", &my_udata, &service_callback), 0, INT_MAX, "setup scan");
+	check_range(&err, emdns_scan(m, now, "_http._tcp.local", &my_udata, &service_callback), 0, INT_MAX, "setup scan");
 
 	static const char request_msg[] =
 		"\0\0" // transaction ID

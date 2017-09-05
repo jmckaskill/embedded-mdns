@@ -12,19 +12,30 @@
 #include <net/if.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <sys/ioctl.h>
 #endif
 
 #include "../emdns.h"
 #include <stdio.h>
 #include <inttypes.h>
+#include <string.h>
 
-static void on_service(void *udata, const char *name, int namesz, const struct sockaddr_in6 *sa, const char *txt, int txtsz) {
-	if (sa) {
-		char buf[64];
-		inet_ntop(AF_INET6, (void*) &sa->sin6_addr, buf, sizeof(buf));
-		printf("+ %.*s IP %s PORT %d\n", namesz, name, buf, ntohs(sa->sin6_port));
-	} else {
+#ifndef max
+#define max(a,b) ((a) > (b) ? (a) : (b))
+#endif
+
+static void on_service(void *udata, const char *name, int namesz, const struct sockaddr *sa, const char *txt, int txtsz) {
+	char buf[64];
+	if (!sa) {
 		printf("- %.*s\n", namesz, name);
+	} else if (sa->sa_family == AF_INET6) {
+		struct sockaddr_in6 *sa6 = (struct sockaddr_in6*) sa;
+		inet_ntop(AF_INET6, (void*) &sa6->sin6_addr, buf, sizeof(buf));
+		printf("+ %.*s IP %s PORT %d\n", namesz, name, buf, ntohs(sa6->sin6_port));
+	} else {
+		struct sockaddr_in *sa4 = (struct sockaddr_in*) sa;
+		inet_ntop(AF_INET, (void*) &sa4->sin_addr, buf, sizeof(buf));
+		printf("+ %.*s IP %s PORT %d\n", namesz, name, buf, ntohs(sa4->sin_port));
 	}
 }
 
@@ -68,18 +79,36 @@ int main(int argc, char *argv[]) {
 		return 2;
 	}
 
-	struct sockaddr_in6 send_addr;
-	int fd = emdns_bind6(interface_id, &send_addr);
+	int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	struct ifreq ifr;
+	ifr.ifr_addr.sa_family = AF_INET;
+	strncpy(ifr.ifr_name, argv[1], IFNAMSIZ-1);
+	ioctl(fd, SIOCGIFADDR, &ifr);
+
+	struct sockaddr_in *ifsa = (struct sockaddr_in *) &ifr.ifr_addr;
+	char buf[64];
+	inet_ntop(AF_INET, (void*) &ifsa->sin_addr, buf, sizeof(buf));
+	fprintf(stderr, "idx %d IP %s %x\n", interface_id, buf, ntohl(ifsa->sin_addr.s_addr));
+	close(fd);
+
+	struct sockaddr_in6 send6;
+	struct sockaddr_in send4;
+
+	int fd6 = emdns_bind6(interface_id, &send6);
+
+	int fd4 = emdns_bind4(ifsa->sin_addr, &send4);
 
 #ifdef _WIN32
-	long nonblock;
-	ioctlsocket(fd, FIONBIO, &nonblock);
+	long nonblock = 1;
+	ioctlsocket(fd4, FIONBIO, &nonblock);
+	ioctlsocket(fd6, FIONBIO, &nonblock);
 #else
-	fcntl(fd, F_SETFL, O_NONBLOCK);
+	fcntl(fd4, F_SETFL, O_NONBLOCK);
+	fcntl(fd6, F_SETFL, O_NONBLOCK);
 #endif
 
 	struct emdns *m = emdns_new("");
-	emdns_scan_ip6(m, tick(), argv[2], NULL, &on_service);
+	emdns_scan(m, tick(), argv[2], NULL, &on_service);
 
 	for (;;) {
 		char buf[1024];
@@ -95,7 +124,8 @@ int main(int argc, char *argv[]) {
 				tv.tv_usec = (long) ((next % 1000) * 1000);
 				break;
 			} else if (w >= 0) {
-				sendto(fd, buf, w, 0, (struct sockaddr*) &send_addr, sizeof(send_addr));
+				sendto(fd4, buf, w, 0, (struct sockaddr*) &send4, sizeof(send4));
+				sendto(fd6, buf, w, 0, (struct sockaddr*) &send6, sizeof(send6));
 			} else {
 				return 2;
 			}
@@ -103,20 +133,34 @@ int main(int argc, char *argv[]) {
 
 		fd_set read;
 		FD_ZERO(&read);
-		FD_SET(fd, &read);
-		int ret = select(fd+1, &read, NULL, NULL, &tv);
+		FD_SET(fd4, &read);
+		FD_SET(fd6, &read);
+		int ret = select(max(fd4,fd6)+1, &read, NULL, NULL, &tv);
 
-		if (ret == 1) {
+		if (ret < 0) {
+			return 2;
+		}
+
+		if (FD_ISSET(fd4, &read)) {
 			for (;;) {
-				int r = recv(fd, buf, sizeof(buf), 0);
+				int r = recv(fd4, buf, sizeof(buf), 0);
 				if (r >= 0) {
 					emdns_process(m, tick(), buf, r);
 				} else {
 					break;
 				}
 			}
-		} else if (ret != 0) {
-			return 2;
+		}
+
+		if (FD_ISSET(fd6, &read)) {
+			for (;;) {
+				int r = recv(fd6, buf, sizeof(buf), 0);
+				if (r >= 0) {
+					emdns_process(m, tick(), buf, r);
+				} else {
+					break;
+				}
+			}
 		}
 	}
 }

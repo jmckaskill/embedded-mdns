@@ -49,7 +49,7 @@ static DWORD WINAPI scan_thread(LPVOID param) {
 	WSAEventSelect(fd, ev, FD_READ);
 
 	struct emdns *m = emdns_new("");
-	emdns_scan_ip6(m, (emdns_time) GetTickCount64(), svc, NULL, &service_update);
+	emdns_scan(m, (emdns_time) GetTickCount64(), svc, NULL, &service_update);
 
 	for (;;) {
 		char buf[1024];

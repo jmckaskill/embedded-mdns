@@ -30,6 +30,7 @@ void emdns_mem_free(void *data);
 #define RCLASS_IN_FLUSH 0x8001
 #define RCLASS_MASK 0x7FFF
 
+#define RTYPE_A 1
 #define RTYPE_AAAA 28
 #define RTYPE_SRV 33
 #define RTYPE_TXT 16
@@ -158,25 +159,44 @@ struct result {
 
 	char *txt; // heap allocated
 	uint16_t txtsz;
-	struct sockaddr_in6 sa;
+	uint16_t port;
+};
+
+// IP address categories from lowest priority to highest
+enum addr_type {
+	INVALID_ADDRESS,
+	LINK_LOCAL_IP4,
+	GLOBAL_IP4,
+	GLOBAL_IP6,
+	SITE_LOCAL_IP6,
+	LINK_LOCAL_IP6,
 };
 
 struct addr {
 	struct record h;
 	struct timeout t;
-	struct in6_addr addr;
+	union {
+		struct sockaddr h;
+		struct sockaddr_in6 ip6;
+		struct sockaddr_in ip4;
+	} sa;
 	bool have_addr;
-	emdns_ip6cb cb;
+	enum addr_type addr_type;
+	emdns_query_cb cb;
 	void *udata;
 	int userid;
 	struct result *results;
+	
+	// temporaries used for addr priority resolution
+	bool in_list;
+	struct addr *next;
 };
 
 struct scan {
 	struct record h;
 	struct timeout t;
 	struct result *results;
-	emdns_svccb cb;
+	emdns_scan_cb cb;
 	void *udata;
 	int userid;
 
@@ -226,4 +246,7 @@ struct emdns {
 	struct pub_service *user_services[MAX_SERVICES];
 	struct addr *user_addrs[MAX_ADDRS];
 	struct scan *user_scans[MAX_SCANS];
+
+	// temporary used for processing prioritized addresses
+	struct addr *dist_addrs;
 };

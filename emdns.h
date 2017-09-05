@@ -43,8 +43,8 @@ void emdns_free(struct emdns *m);
 int emdns_publish_ip6(struct emdns *m, emdns_time now, const struct in6_addr *addr);
 int emdns_publish_service(struct emdns *m, emdns_time now, const char *svc, const char *txt, uint16_t port);
 
-typedef void(*emdns_ip6cb)(void *udata, const struct in6_addr *addr);
-typedef void(*emdns_svccb)(void *udata, const char *name, int namesz, const struct sockaddr_in6 *sa, const char *txt, int txtsz);
+typedef void(*emdns_query_cb)(void *udata, const struct sockaddr *addr);
+typedef void(*emdns_scan_cb)(void *udata, const char *name, int namesz, const struct sockaddr *sa, const char *txt, int txtsz);
 
 // emdns_query starts a one-shot DNS query
 // the callback will be called with the first valid response or on timeout
@@ -58,7 +58,7 @@ typedef void(*emdns_svccb)(void *udata, const char *name, int namesz, const stru
 // possible errors include:
 // MDNS_TOO_MANY - too many concurrent requests
 // MDNS_MALFORMED - malformed request record
-int emdns_query_ip6(struct emdns *m, emdns_time now, const char *name, void *udata, emdns_ip6cb cb);
+int emdns_query(struct emdns *m, emdns_time now, const char *name, void *udata, emdns_query_cb cb);
 
 // emdns_scan starts a continuous scan
 // add will be called as results are found
@@ -70,7 +70,7 @@ int emdns_query_ip6(struct emdns *m, emdns_time now, const char *name, void *uda
 // possible errors include:
 // MDNS_TOO_MANY - too many concurrent requests
 // MDNS_MALFORMED - malformed request record
-int emdns_scan_ip6(struct emdns *m, emdns_time now, const char *name, void *udata, emdns_svccb cb);
+int emdns_scan(struct emdns *m, emdns_time now, const char *name, void *udata, emdns_scan_cb cb);
 
 // emdns_stop stops a pending scan, query or publish
 int emdns_stop(struct emdns *m, int id);
@@ -81,4 +81,6 @@ int emdns_stop(struct emdns *m, int id);
 // the socket is bound to the interface specified
 // this is only implemented for mainstream operating systems
 int emdns_bind6(int interface_id, struct sockaddr_in6 *send_addr);
+
+int emdns_bind4(struct in_addr interface_addr, struct sockaddr_in *send_addr);
 
