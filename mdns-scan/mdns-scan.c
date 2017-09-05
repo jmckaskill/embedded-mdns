@@ -10,11 +10,13 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <net/if.h>
-#define closesocket(fd) close(fd)
+#include <arpa/inet.h>
+#include <fcntl.h>
 #endif
 
 #include "../emdns.h"
 #include <stdio.h>
+#include <inttypes.h>
 
 static void on_service(void *udata, const char *name, int namesz, const struct sockaddr_in6 *sa, const char *txt, int txtsz) {
 	if (sa) {
@@ -40,7 +42,7 @@ emdns_time tick() {
 		mach_timebase_info(&g_timebase_info);
 	}
     double ns = ((double)ticks * g_timebase_info.numer) / g_timebase_info.denom;
-    return (emdns_time)(ns * 1e3);
+	return (emdns_time)(ns / 1e6);
 #else
 	struct timespec tv;
 	clock_gettime(CLOCK_MONOTONIC, &tv);
@@ -77,7 +79,7 @@ int main(int argc, char *argv[]) {
 #endif
 
 	struct emdns *m = emdns_new("");
-	emdns_scan_ip6(m, (emdns_time) GetTickCount64(), argv[2], NULL, &on_service);
+	emdns_scan_ip6(m, tick(), argv[2], NULL, &on_service);
 
 	for (;;) {
 		char buf[1024];

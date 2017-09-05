@@ -13,6 +13,7 @@ int emdns_bind6(int interface_id, struct sockaddr_in6* send_addr) {
 	}
 
 	int enable = 1;
+	int hops = 255;
 
 	if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable))) {
 		goto err;
@@ -22,7 +23,13 @@ int emdns_bind6(int interface_id, struct sockaddr_in6* send_addr) {
     }
     if (setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &enable, sizeof(enable))) {
 		goto err;
-    }
+	}
+	if (setsockopt(fd, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &hops, sizeof(hops))) {
+		goto err;
+	}
+	if (setsockopt(fd, IPPROTO_IPV6, IPV6_MULTICAST_IF, &interface_id, sizeof(interface_id))) {
+		goto err;
+	}
     
 	unsigned char addr[16] = {0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFB};
 	struct ipv6_mreq req = {0};
