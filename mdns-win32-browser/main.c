@@ -1,6 +1,5 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include <winsock2.h>
-#include <IPHlpApi.h>
 #include <windows.h>
 #include <windowsx.h>
 #include <commctrl.h>
@@ -11,7 +10,6 @@
 #include "../emdns.h"
 #include "scan-thread.h"
 
-#pragma comment(lib, "iphlpapi.lib")
 
 struct text {
 	const wchar_t *ENGLISH;
@@ -28,6 +26,7 @@ static struct text STR_WEB_UI = {L"Web UI (_http._tcp)", L"Web UI (_http._tcp)"}
 static struct text STR_SSH = {L"SSH (_ssh._tcp)", L"SSH (_ssh._tcp)"};
 static struct text STR_ERROR = {L"Error", L"Error"};
 static struct text STR_NO_INTERFACES = {L"No valid interfaces found", L"No valid interfaces found"};
+static struct text STR_PUTTY_ERROR = {L"Failed to launch PuTTY. Please check that it is installed and available in C:\\Program Files\\PuTTY"};
 
 static int wfrom_hex(wchar_t ch) {
 	if (L'0' <= ch && ch <= L'9') {
@@ -73,7 +72,7 @@ static const wchar_t *get_text(const struct text *text) {
 
 	switch (chosen_lang) {
 	case LANG_GERMAN:
-		return text->GERMAN;
+		return text->GERMAN ? text->GERMAN : text->ENGLISH;
 	default:
 		return text->ENGLISH;
 	}
@@ -119,6 +118,7 @@ struct mdns_browser {
 	
 	enum service_type cur_service;
 	int cur_interface_id;
+	struct in_addr cur_interface_ip;
 	int interface_num;
 	int interface_ids[MAX_INTERFACES];
 };
@@ -244,33 +244,32 @@ static void update_positions(struct mdns_browser *b) {
 	update_position(&b->button_open);
 }
 
-static void lookup_interfaces(struct mdns_browser *b) {
-	unsigned long bufsz = 256*1024;
-	IP_ADAPTER_ADDRESSES *buf = (IP_ADAPTER_ADDRESSES*) malloc(bufsz);
-	if (!GetAdaptersAddresses(AF_INET6, 0, 0, buf, &bufsz)) {
-		int idx = 0;
-
-		for (IP_ADAPTER_ADDRESSES *addr = buf; addr != NULL && idx < MAX_INTERFACES; addr = addr->Next) {
-			switch (addr->IfType) {
-			case IF_TYPE_ETHERNET_CSMACD:
-			case IF_TYPE_PPP:
-			case IF_TYPE_SOFTWARE_LOOPBACK:
-			case IF_TYPE_IEEE80211:
-				if (addr->Flags & IP_ADAPTER_IPV6_ENABLED) {
-					wchar_t buf[256];
-					_snwprintf(buf, sizeof(buf), L"%s (%s)", addr->FriendlyName, addr->Description);
-					buf[sizeof(buf) / sizeof(buf[0]) - 1] = L'\0';
-					b->interface_ids[idx++] = addr->IfIndex;
-					SendMessageW(b->combo_interface.h, CB_ADDSTRING, 0, (LPARAM) buf);
-				}
-				break;
-			}
-		}
-
-		b->interface_num = idx;
+static int on_interface(void *udata, const struct emdns_interface *iface) {
+	struct mdns_browser *b = (struct mdns_browser*) udata;
+	if (b->interface_num == MAX_INTERFACES || !iface->ip6_num) {
+		return 0;
 	}
 
-	free(buf);
+	wchar_t buf[256];
+	_snwprintf(buf, sizeof(buf), L"%s (%s)", iface->name, iface->description);
+	buf[sizeof(buf) / sizeof(buf[0]) - 1] = L'\0';
+	b->interface_ids[b->interface_num] = iface->id;
+	SendMessageW(b->combo_interface.h, CB_ADDSTRING, 0, (LPARAM) buf);
+
+	b->interface_num++;
+	return 0;
+}
+
+static int lookup_interface_ip(void *udata, const struct emdns_interface *iface) {
+	struct mdns_browser *b = (struct mdns_browser*) udata;
+	if (iface->id != b->cur_interface_id) {
+		return 0;
+	}
+	if (!iface->ip4) {
+		return -1;
+	}
+	b->cur_interface_ip = *iface->ip4;
+	return 0;
 }
 
 static void add_services(struct mdns_browser *b) {
@@ -283,18 +282,53 @@ static void create_control(struct mdns_browser *b, struct control *c, LPCWSTR Cl
 	c->h = CreateWindowW(ClassName, Text, style | WS_CHILD, c->x, c->y, c->cx, c->cy, b->window, (HMENU) (uintptr_t) idc, b->instance, NULL);
 }
 
-static int append_ipv6(wchar_t *buf, int bufsz, struct sockaddr_in6 *sa, int interface_id) {
-	InetNtopW(AF_INET6, &sa->sin6_addr, buf, bufsz);
-	// now convert to UNC version, replace : with -
-	wchar_t *p = buf;
-	while (*p) {
-		if (*p == ':') {
-			*p = '-';
+static int append_ip(wchar_t *buf, int bufsz, struct sockaddr *sa, int interface_id) {
+	switch (sa->sa_family) {
+	case AF_INET: {
+			struct sockaddr_in *sa4 = (struct sockaddr_in*) sa;
+			InetNtopW(AF_INET, &sa4->sin_addr, buf, bufsz);
+			return (int) wcslen(buf);
 		}
-		p++;
+	case AF_INET6: {
+			struct sockaddr_in6 *sa6 = (struct sockaddr_in6*) sa;
+			InetNtopW(AF_INET6, &sa6->sin6_addr, buf, bufsz);
+			// now convert to UNC version, replace : with -
+			wchar_t *p;
+			for (p = buf; *p; p++) {
+				if (*p == ':') { 
+					*p = '-';
+				}
+			}
+			p += swprintf(p, buf + bufsz - p, L"s%d.ipv6-literal.net", interface_id);
+			return (int) (p - buf);
+		}
+	default:
+		assert(0);
+		return 0;
 	}
-	p += swprintf(p, buf + bufsz - p, L"s%d.ipv6-literal.net", interface_id);
-	return (int) (p - buf);
+}
+
+static void start_scan(struct mdns_browser *b) {
+	int ifidx = ComboBox_GetCurSel(b->combo_interface.h);
+	assert(ifidx < b->interface_num);
+	int svcidx = ComboBox_GetCurSel(b->combo_service.h);
+	b->cur_interface_id = b->interface_ids[ifidx];
+	b->cur_service = (enum service_type) svcidx;
+	if (!emdns_lookup_interfaces(b, &lookup_interface_ip)) {
+		start_scan_thread(b->window, b->cur_interface_id, b->cur_interface_ip, g_services[b->cur_service].svcname);
+	}
+}
+
+static void restart_scan(struct mdns_browser *b) {
+	stop_scan_thread();
+	int num = ListBox_GetCount(b->list_nodes.h);
+	for (int i = 0; i < num; i++) {
+		struct answer *a = (struct answer*) ListBox_GetItemData(b->list_nodes.h, i);
+		free(a->text);
+		free(a);
+	}
+	ListBox_ResetContent(b->list_nodes.h);
+	start_scan(b);
 }
 
 LRESULT CALLBACK browser_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
@@ -326,10 +360,9 @@ LRESULT CALLBACK browser_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
 
 		create_control(&b, &b.button_open, WC_BUTTONW, get_text(&STR_OPEN), WS_VISIBLE, IDC_OPEN);
 
-		lookup_interfaces(&b);
 		add_services(&b);
 
-		if (!b.interface_num) {
+		if (emdns_lookup_interfaces(&b, &on_interface) || !b.interface_num) {
 			MessageBoxW(hwnd, get_text(&STR_NO_INTERFACES), get_text(&STR_ERROR), MB_OK);
 			PostQuitMessage(1);
 			break;
@@ -337,9 +370,7 @@ LRESULT CALLBACK browser_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
 
 		ComboBox_SetCurSel(b.combo_interface.h, 0);
 		ComboBox_SetCurSel(b.combo_service.h, 0);
-		b.cur_interface_id = b.interface_ids[0];
-		b.cur_service = (enum service_type) 0;
-		start_scan_thread(b.window, b.cur_interface_id, g_services[b.cur_service].svcname);
+		start_scan(&b);
 		break;
 	}
 	case WM_COMMAND:
@@ -347,14 +378,27 @@ LRESULT CALLBACK browser_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
 			int idx = ListBox_GetCurSel(b.list_nodes.h);
 			struct answer *a = (struct answer*) ListBox_GetItemData(b.list_nodes.h, idx);
 
-			wchar_t buf[512];
-			InetNtopW(AF_INET6, &a->addr.sin6_addr, buf,sizeof(buf));
-			size_t sz = wcslen(buf);
-			swprintf(buf + sz, sizeof(buf) - sz, L"%%%d", b.cur_interface_id);
-			SetWindowTextW(b.static_ip.h, buf);
+			wchar_t ip[128], port[32];
 
-			swprintf(buf, sizeof(buf), L"%d", ntohs(a->addr.sin6_port));
-			SetWindowTextW(b.static_port.h, buf);
+			switch (a->addr.h.sa_family) {
+			case AF_INET:
+				InetNtopW(AF_INET, &a->addr.ip4.sin_addr, ip, sizeof(ip));
+				swprintf(port, sizeof(port), L"%d", ntohs(a->addr.ip4.sin_port));
+				break;
+			case AF_INET6:
+				InetNtopW(AF_INET6, &a->addr.ip6.sin6_addr, ip, sizeof(ip));
+				swprintf(ip + wcslen(ip), sizeof(ip) - wcslen(ip), L"%%%d", b.cur_interface_id);
+				swprintf(port, sizeof(port), L"%d", ntohs(a->addr.ip6.sin6_port));
+				break;
+			default:
+				assert(0);
+				ip[0] = 0;
+				port[0] = 0;
+				break;
+			}
+
+			SetWindowTextW(b.static_ip.h, ip);
+			SetWindowTextW(b.static_port.h, port);
 
 		} else if ((HIWORD(wparam) == LBN_DBLCLK && LOWORD(wparam) == IDC_LIST) || (HIWORD(wparam) == BN_CLICKED && LOWORD(wparam) == IDC_OPEN)) {
 			int idx = ListBox_GetCurSel(b.list_nodes.h);
@@ -362,12 +406,12 @@ LRESULT CALLBACK browser_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
 			assert(a != NULL);
 			wchar_t buf[512];
 			int sz = 0;
-			uint16_t port = ntohs(a->addr.sin6_port);
+			uint16_t port = ntohs(a->addr.h.sa_family == AF_INET6 ? a->addr.ip6.sin6_port : a->addr.ip4.sin_port);
 
 			switch (b.cur_service) {
 			case HTTP:
 				sz += swprintf(buf+sz, sizeof(buf)-sz, L"http://");
-				sz += append_ipv6(buf+sz, sizeof(buf)-sz, &a->addr, b.cur_interface_id);
+				sz += append_ip(buf+sz, sizeof(buf)-sz, &a->addr.h, b.cur_interface_id);
 				if (port != 80) {
 					sz += swprintf(buf+sz, sizeof(buf)-sz, L":%d", port);
 				}
@@ -378,29 +422,17 @@ LRESULT CALLBACK browser_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
 				if (port != 22) {
 					sz += swprintf(buf+sz, sizeof(buf)-sz, L"-P %d ", port);
 				}
-				sz += append_ipv6(buf+sz, sizeof(buf)-sz, &a->addr, b.cur_interface_id);
-				ShellExecuteW(b.window, NULL, L"C:\\Program Files\\PuTTY\\putty.exe", buf, NULL, SW_SHOW);
+				sz += append_ip(buf+sz, sizeof(buf)-sz, &a->addr.h, b.cur_interface_id);
+				if ((int) (uintptr_t) ShellExecuteW(b.window, NULL, L"C:\\Program Files\\PuTTY\\putty.exe", buf, NULL, SW_SHOW) < 32) {
+					MessageBoxW(hwnd, get_text(&STR_PUTTY_ERROR), get_text(&STR_ERROR), MB_OK);
+				}
 				break;
 			default:
 				break;
 			}
 			
 		} else if (HIWORD(wparam) == CBN_SELCHANGE && (LOWORD(wparam) == IDC_INTERFACE || LOWORD(wparam) == IDC_SERVICE)) {
-			stop_scan_thread();
-			int num = ListBox_GetCount(b.list_nodes.h);
-			for (int i = 0; i < num; i++) {
-				struct answer *a = (struct answer*) ListBox_GetItemData(b.list_nodes.h, i);
-				free(a->text);
-				free(a);
-			}
-			ListBox_ResetContent(b.list_nodes.h);
-
-			int ifidx = ComboBox_GetCurSel(b.combo_interface.h);
-			assert(ifidx < b.interface_num);
-			int svcidx = ComboBox_GetCurSel(b.combo_service.h);
-			b.cur_interface_id = b.interface_ids[ifidx];
-			b.cur_service = (enum service_type) svcidx;
-			start_scan_thread(b.window, b.cur_interface_id, g_services[b.cur_service].svcname);
+			restart_scan(&b);
 		}
 		break;
 	case WM_SIZE:

@@ -24,7 +24,7 @@
 #define max(a,b) ((a) > (b) ? (a) : (b))
 #endif
 
-static void on_service(void *udata, const char *name, int namesz, const struct sockaddr *sa, const char *txt, int txtsz) {
+static void on_service(void *udata, const char *name, int namesz, const struct sockaddr *sa, int sasz, const char *txt, int txtsz) {
 	char buf[64];
 	if (!sa) {
 		printf("- %.*s\n", namesz, name);
@@ -61,54 +61,67 @@ emdns_time tick() {
 #endif
 }
 
+static int g_interface_id = -1;
+static struct in_addr g_interface_ip;
+
+static int on_interface(void *udata, const struct emdns_interface *iface) {
+#ifdef _WIN32
+	if (!wcscmp((wchar_t*)udata, iface->name)) {
+#else
+	if (!strcmp((char*) udata, iface->name)) {
+#endif
+		if (!iface->ip4) {
+			fprintf(stderr, "interface does not have ip4 enabled\n");
+			return 2;
+		}
+		if (!iface->ip6_num) {
+			fprintf(stderr, "interface does not have ip6 enabled\n");
+			return 3;
+		}
+		g_interface_id = iface->id;
+		g_interface_ip = *iface->ip4;
+	}
+	return 0;
+}
+
+#ifdef _WIN32
+int wmain(int argc, wchar_t *argv[]) {
+#else
 int main(int argc, char *argv[]) {
-	char buf2[256];
-	if_indextoname(3, buf2);
+#endif
 	if (argc < 3) {
 		fprintf(stderr, "usage: mdns-scan [interface] [service]\n"
 			"\tservice is the service to search for e.g. _http._tcp.local.)\n"
-			"\tinterface is the name of the interface to search on e.g. eth0 or \"Ethernet 2\"\n"
+			"\tinterface is the name of the interface to search on e.g. eth0 or \"Local Area Connection 2\"\n"
 			);
-		return 2;
+		return 1;
 	}
 
-
-	int interface_id = if_nametoindex(argv[1]);
-	if (!interface_id) {
-		fprintf(stderr, "%s is not a valid interface\n", argv[1]);
-		return 2;
+	if (emdns_lookup_interfaces(argv[1], &on_interface) || g_interface_id < 0) {
+		fprintf(stderr, "could not find interface\n");
+		return 4;
 	}
-
-	int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-	struct ifreq ifr;
-	ifr.ifr_addr.sa_family = AF_INET;
-	strncpy(ifr.ifr_name, argv[1], IFNAMSIZ-1);
-	ioctl(fd, SIOCGIFADDR, &ifr);
-
-	struct sockaddr_in *ifsa = (struct sockaddr_in *) &ifr.ifr_addr;
-	char buf[64];
-	inet_ntop(AF_INET, (void*) &ifsa->sin_addr, buf, sizeof(buf));
-	fprintf(stderr, "idx %d IP %s %x\n", interface_id, buf, ntohl(ifsa->sin_addr.s_addr));
-	close(fd);
 
 	struct sockaddr_in6 send6;
 	struct sockaddr_in send4;
 
-	int fd6 = emdns_bind6(interface_id, &send6);
-
-	int fd4 = emdns_bind4(ifsa->sin_addr, &send4);
+	int fd6 = emdns_bind6(g_interface_id, &send6);
+	int fd4 = emdns_bind4(g_interface_ip, &send4);
 
 #ifdef _WIN32
+	char svc[64];
+	WideCharToMultiByte(CP_UTF8, 0, argv[2], -1, svc, sizeof(svc), NULL, NULL);
 	long nonblock = 1;
 	ioctlsocket(fd4, FIONBIO, &nonblock);
 	ioctlsocket(fd6, FIONBIO, &nonblock);
 #else
+	char *svc = argv[2];
 	fcntl(fd4, F_SETFL, O_NONBLOCK);
 	fcntl(fd6, F_SETFL, O_NONBLOCK);
 #endif
 
 	struct emdns *m = emdns_new("");
-	emdns_scan(m, tick(), argv[2], NULL, &on_service);
+	emdns_scan(m, tick(), svc, NULL, &on_service);
 
 	for (;;) {
 		char buf[1024];

@@ -13,6 +13,7 @@
 static HANDLE g_thread = INVALID_HANDLE_VALUE;
 static HWND g_window;
 static int g_interface_id;
+static struct in_addr g_interface_ip;
 static HANDLE g_stop_event;
 
 static struct answer *create_answer(const char *name, int namesz) {
@@ -24,13 +25,13 @@ static struct answer *create_answer(const char *name, int namesz) {
 	return ret;
 }
 
-static void service_update(void *udata, const char *name, int namesz, const struct sockaddr_in6 *sa, const char *txt, int txtsz) {
+static void service_update(void *udata, const char *name, int namesz, const struct sockaddr *sa, int sasz, const char *txt, int txtsz) {
 	struct answer *a = create_answer(name, namesz);
-	if (sa) {
+	if (sa && sasz <= sizeof(a->addr)) {
 		a->text = (char*) malloc(txtsz+1);
 		memcpy(a->text, txt, txtsz);
 		a->text[txtsz] = '\0';
-		memcpy(&a->addr, sa, sizeof(a->addr));
+		memcpy(&a->addr, sa, sasz);
 		PostMessage(g_window, MSG_ADD, (WPARAM) a, 0);
 	} else {
 		PostMessage(g_window, MSG_REMOVE, (WPARAM) a, 0);
@@ -39,14 +40,22 @@ static void service_update(void *udata, const char *name, int namesz, const stru
 
 static DWORD WINAPI scan_thread(LPVOID param) {
 	const char *svc = (char*) param;
-	struct sockaddr_in6 send_addr;
-	int fd = emdns_bind6(g_interface_id, &send_addr);
-	if (fd < 0) {
+	struct sockaddr_in send4;
+	struct sockaddr_in6 send6;
+	int fd6 = emdns_bind6(g_interface_id, &send6);
+	if (fd6 < 0) {
+		return 1;
+	}
+	int fd4 = emdns_bind4(g_interface_ip, &send4);
+	if (fd4 < 0) {
+		closesocket(fd6);
 		return 1;
 	}
 
-	HANDLE ev = WSACreateEvent();
-	WSAEventSelect(fd, ev, FD_READ);
+	HANDLE ev4 = WSACreateEvent();
+	HANDLE ev6 = WSACreateEvent();
+	WSAEventSelect(fd4, ev4, FD_READ);
+	WSAEventSelect(fd6, ev6, FD_READ);
 
 	struct emdns *m = emdns_new("");
 	emdns_scan(m, (emdns_time) GetTickCount64(), svc, NULL, &service_update);
@@ -62,17 +71,31 @@ static DWORD WINAPI scan_thread(LPVOID param) {
 				timeout = (int) (next - now);
 				break;
 			}
-			sendto(fd, buf, w, 0, (struct sockaddr*) &send_addr, sizeof(send_addr));
+			sendto(fd4, buf, w, 0, (struct sockaddr*) &send4, sizeof(send4));
+			sendto(fd6, buf, w, 0, (struct sockaddr*) &send6, sizeof(send6));
 		}
 
-		HANDLE events[2] = {ev, g_stop_event};
-		DWORD ret = WSAWaitForMultipleEvents(2, events, FALSE, timeout, FALSE);
+		HANDLE events[3] = {g_stop_event, ev4, ev6};
+		DWORD ret = WSAWaitForMultipleEvents(3, events, FALSE, timeout, FALSE);
 		switch (ret) {
-		case WAIT_OBJECT_0: {
+		case WAIT_OBJECT_0+1: {
 				WSANETWORKEVENTS netevents;
-				if (!WSAEnumNetworkEvents(fd, ev, &netevents) && (netevents.lNetworkEvents & FD_READ)) {
+				if (!WSAEnumNetworkEvents(fd4, ev4, &netevents) && (netevents.lNetworkEvents & FD_READ)) {
 					for (;;) {
-						int w = recv(fd, buf, sizeof(buf), 0);
+						int w = recv(fd4, buf, sizeof(buf), 0);
+						if (w < 0) {
+							break;
+						}
+						emdns_process(m, (emdns_time) GetTickCount64(), buf, w);
+					}
+				}
+			}
+			break;
+		case WAIT_OBJECT_0 + 2: {
+				WSANETWORKEVENTS netevents;
+				if (!WSAEnumNetworkEvents(fd6, ev6, &netevents) && (netevents.lNetworkEvents & FD_READ)) {
+					for (;;) {
+						int w = recv(fd6, buf, sizeof(buf), 0);
 						if (w < 0) {
 							break;
 						}
@@ -89,17 +112,20 @@ static DWORD WINAPI scan_thread(LPVOID param) {
 	}
 
 end:
-	CloseHandle(ev);
-	closesocket(fd);
+	CloseHandle(ev4);
+	CloseHandle(ev6);
+	closesocket(fd4);
+	closesocket(fd6);
 	emdns_free(m);
 
 	return 0;
 }
 
-void start_scan_thread(HWND window, int interface_id, const char *svcname) {
+void start_scan_thread(HWND window, int interface_id, struct in_addr interface_ip, const char *svcname) {
 	assert(g_thread == INVALID_HANDLE_VALUE);
 	g_window = window;
 	g_interface_id = interface_id;
+	g_interface_ip = interface_ip;
 	g_stop_event = CreateEvent(NULL, TRUE, FALSE, NULL);
 	g_thread = CreateThread(NULL, 0, &scan_thread, (LPVOID) svcname, 0, NULL);
 }

@@ -44,7 +44,7 @@ int emdns_publish_ip6(struct emdns *m, emdns_time now, const struct in6_addr *ad
 int emdns_publish_service(struct emdns *m, emdns_time now, const char *svc, const char *txt, uint16_t port);
 
 typedef void(*emdns_query_cb)(void *udata, const struct sockaddr *addr);
-typedef void(*emdns_scan_cb)(void *udata, const char *name, int namesz, const struct sockaddr *sa, const char *txt, int txtsz);
+typedef void(*emdns_scan_cb)(void *udata, const char *name, int namesz, const struct sockaddr *sa, int sasz, const char *txt, int txtsz);
 
 // emdns_query starts a one-shot DNS query
 // the callback will be called with the first valid response or on timeout
@@ -83,4 +83,21 @@ int emdns_stop(struct emdns *m, int id);
 int emdns_bind6(int interface_id, struct sockaddr_in6 *send_addr);
 
 int emdns_bind4(struct in_addr interface_addr, struct sockaddr_in *send_addr);
+
+struct emdns_interface {
+	int id;
+	const struct in_addr *ip4;
+	const struct in6_addr *ip6;
+	int ip6_num;
+#ifdef _WIN32
+	const wchar_t *name;
+	const wchar_t *description;
+#else
+	const char *name;
+#endif
+};
+
+typedef int(*emdns_ifcb)(void* udata, const struct emdns_interface *iface);
+int emdns_lookup_interfaces(void *udata, emdns_ifcb cb);
+
 

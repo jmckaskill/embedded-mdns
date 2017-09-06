@@ -360,18 +360,21 @@ static void publish_result(struct result *r) {
     char *label = (char*) r->h.key.name + 1;
 
     if (r->published && !all) {
-        r->scan->cb(r->scan->udata, label, labelsz, NULL, NULL, 0);
+        r->scan->cb(r->scan->udata, label, labelsz, NULL, 0, NULL, 0);
         r->published = false;
     }
 
     if (all && (!r->published || r->dirty)) {
         struct addr *a = r->srv;
+		int sasz;
         if (a->sa.h.sa_family == AF_INET) {
             a->sa.ip4.sin_port = htons(r->port);
+			sasz = sizeof(a->sa.ip4);
         } else {
             a->sa.ip6.sin6_port = htons(r->port);
+			sasz = sizeof(a->sa.ip6);
         }
-        r->scan->cb(r->scan->udata, label, labelsz, &r->srv->sa.h, r->txt, r->txtsz);
+        r->scan->cb(r->scan->udata, label, labelsz, &r->srv->sa.h, sasz, r->txt, r->txtsz);
         r->published = true;
     }
 
@@ -895,11 +898,13 @@ data_error:
     return EMDNS_MALFORMED;
 }
 
-static enum addr_type categorize_address(uint8_t rtype, uint8_t *data, int datasz) {
+static enum addr_type categorize_address(uint16_t rtype, uint8_t *data, int datasz) {
     switch (rtype) {
     case RTYPE_A:
         if (datasz == sizeof(struct in_addr)) {
-            if (data[0] == 169 && data[1] == 254) {
+			if (data[0] == 0) {
+				return INVALID_ADDRESS;
+			} else if (data[0] == 169 && data[1] == 254) {
                 return LINK_LOCAL_IP4;
             } else if (data[0] < 224) {
                 return GLOBAL_IP4;
@@ -927,7 +932,7 @@ static enum addr_type categorize_address(uint8_t rtype, uint8_t *data, int datas
     return INVALID_ADDRESS;
 }
 
-static int process_addr(struct emdns *m, emdns_time now, struct key *k, uint8_t rtype, uint8_t *u, int sz, int off) {
+static int process_addr(struct emdns *m, emdns_time now, struct key *k, uint16_t rtype, uint8_t *u, int sz, int off) {
     int ttl = get_ttl(u + off);
     uint16_t datasz = big_16(u + off + 4);
     int dataoff = off + 6;
