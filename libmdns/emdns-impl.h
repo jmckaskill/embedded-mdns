@@ -220,7 +220,8 @@ struct publish {
 
 struct pub_ip {
 	struct publish h;
-	struct in6_addr addr;
+	int family;
+	uint8_t addr[16];
 };
 
 struct pub_service {

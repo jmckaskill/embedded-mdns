@@ -1,4 +1,5 @@
 #include "emdns-impl.h"
+#include "../simple-emdns.h"
 #include <assert.h>
 
 #ifdef _WIN32
@@ -623,7 +624,7 @@ static void init_publish(struct emdns *m, struct publish *p, emdns_time now, enu
     heap_insert(&m->publish_heap, &p->hn, &compare_publish);
 }
 
-int emdns_publish_ip6(struct emdns *m, emdns_time now, const struct in6_addr *addr) {
+int emdns_publish_ip(struct emdns *m, emdns_time now, int family, const void *addr) {
 	if (m->hostname.namesz <= 1) {
 		return EMDNS_MALFORMED;
 	}
@@ -642,7 +643,7 @@ int emdns_publish_ip6(struct emdns *m, emdns_time now, const struct in6_addr *ad
     }
 
     init_publish(m, &p->h, now + random_wait(1, 250), PUBLISH_AAAA);
-    memcpy(&p->addr, addr, sizeof(*addr));
+    memcpy(&p->addr, addr, family == AF_INET6 ? 16 : 4);
 
 	m->user_ips[id] = p;
     return id + ID_IP;
@@ -1218,6 +1219,141 @@ int emdns_process(struct emdns *m, emdns_time now, const void *msg, int sz) {
     }
 }
 
+int emdns_should_respond(struct emdns_responder *r, const void *msg, int sz) {
+	if (sz < 12) {
+		return EMDNS_MALFORMED;
+	}
+
+	uint8_t *u = (uint8_t*) msg;
+	uint16_t flags = big_16(u + 2);
+	uint16_t question_num = big_16(u + 4);
+	uint16_t answer_num = big_16(u + 6);
+	uint16_t auth_num = big_16(u + 8);
+	uint16_t additional_num = big_16(u + 10);
+	int off = 12;
+	int possible_answers = 0;
+
+	if (flags & FLAG_RESPONSE) {
+		return 0;
+	}
+
+	if (auth_num || additional_num) {
+		return EMDNS_MALFORMED;
+	}
+
+	for (size_t i = 0; i < r->svcn; i++) {
+		r->svcv[i].respond = 0;
+	}
+
+	while (question_num--) {
+		uint8_t name[MAX_HOST_SIZE];
+		int namesz = decode_dns_name(name, u, sz, &off);
+		if (namesz < 0 || off + 4 > sz) {
+			return EMDNS_MALFORMED;
+		}
+
+		uint8_t labelsz = name[0];
+		uint16_t rtype = big_16(u + off);
+		uint16_t rclass = big_16(u + off + 2) & RCLASS_MASK;
+		off += 4;
+
+		if (rclass != RCLASS_IN) {
+			continue;
+		}
+
+		switch (rtype) {
+		case RTYPE_A:
+		case RTYPE_AAAA:
+			if (r->hostsz == namesz && equals_dns_name(r->host, name)) {
+				return EMDNS_RESPOND;
+			}
+			break;
+		case RTYPE_SRV:
+		case RTYPE_TXT:
+			if (labelsz == r->labelsz && !strncasecmp((char*) name + 1, r->label, labelsz)) {
+				for (size_t i = 0; i < r->svcn; i++) {
+					struct emdns_service *s = &r->svcv[i];
+					if (s->namesz == namesz - labelsz - 1 && equals_dns_name(s->name, name + labelsz + 1)) {
+						return EMDNS_RESPOND;
+					}
+				}
+			}
+			break;
+		case RTYPE_PTR:
+			for (size_t i = 0; i < r->svcn; i++) {
+				struct emdns_service *s = &r->svcv[i];
+				if (!s->respond && s->namesz == namesz && equals_dns_name(s->name, name)) {
+					s->respond = 1;
+					possible_answers++;
+				}
+			}
+		}
+
+	}
+
+	if (!possible_answers) {
+		return 0;
+	}
+
+	while (answer_num--) {
+		uint8_t svc[MAX_HOST_SIZE];
+		int svcsz = decode_dns_name(svc, u, sz, &off);
+		if (svcsz < 0 || off + 10 > sz) {
+			return EMDNS_MALFORMED;
+		}
+
+		uint16_t rtype = big_16(u + off);
+		uint16_t rclass = big_16(u + off + 2);
+		uint32_t ttl = big_32(u + off + 4);
+		uint16_t datasz = big_16(u + off + 8);
+		int dataoff = off + 10;
+		off += 10 + datasz;
+
+		(void) ttl; // TODO check ttl
+
+		if (off > sz) {
+			return EMDNS_MALFORMED;
+		}
+
+		if (rclass != RCLASS_IN || rtype != RTYPE_PTR) {
+			continue;
+		}
+
+		uint8_t name[MAX_HOST_SIZE];
+		int namesz = decode_dns_name(name, u, sz, &dataoff);
+		if (namesz < 0 || dataoff != off) {
+			return EMDNS_MALFORMED;
+		}
+
+		uint8_t labelsz = name[0];
+		if (namesz != svcsz + labelsz + 1 || !equals_dns_name(svc, name + 1 + labelsz)) {
+			continue;
+		}
+
+		if (labelsz != r->labelsz || !strncasecmp((char*) name + 1, r->label, labelsz)) {
+			continue;
+		}
+
+		for (size_t i = 0; i < r->svcn; i++) {
+			struct emdns_service *s = &r->svcv[i];
+			if (s->respond && svcsz == s->namesz && equals_dns_name(svc, s->name)) {
+				if (--possible_answers == 0) {
+					return 0;
+				}
+			}
+		}
+	}
+
+	if (possible_answers) {
+		return EMDNS_RESPOND;
+	}
+
+	return 0;
+}
+
+
+
+
 
 ///////////
 // ENCODERS
@@ -1295,9 +1431,9 @@ static int encode_result(struct result *r, emdns_time now, uint8_t *buf, int sz,
     return 0;
 }
 
-static int encode_local_addr(struct emdns *m, struct pub_ip *s, uint8_t *buf, int sz, int *off, int *hostoff) {
-    int datasz = 16;
-    int reqsz = (*hostoff ? 2 : m->hostname.namesz) + 2 /*type*/ + 2 /*class*/ + 4 /*ttl*/ + 2 /*datasz*/ + datasz;
+static int encode_address(const uint8_t *host, int hostsz, int family, const void *addr, uint8_t *buf, int sz, int *off, int *hostoff) {
+    int datasz = family == AF_INET6 ? 16 : 4;
+    int reqsz = (*hostoff ? 2 : hostsz) + 2 /*type*/ + 2 /*class*/ + 4 /*ttl*/ + 2 /*datasz*/ + datasz;
 
 	if (*off + reqsz > sz) {
 		return -1;
@@ -1309,23 +1445,23 @@ static int encode_local_addr(struct emdns *m, struct pub_ip *s, uint8_t *buf, in
 		p += 2;
 	} else {
 		*hostoff = *off;
-		memcpy(p, m->hostname.name, m->hostname.namesz);
-		p += m->hostname.namesz;
+		memcpy(p, host, hostsz);
+		p += hostsz;
 	}
-	put_big_16(p, RTYPE_AAAA);
+	put_big_16(p, family ? RTYPE_AAAA : RTYPE_A);
 	put_big_16(p + 2, RCLASS_IN_FLUSH);
 	put_big_32(p + 4, TTL_DEFAULT);
 	put_big_16(p + 8, datasz);
 	p += 10;
-	memcpy(p, &s->addr, 16);
-	p += 16;
+	memcpy(p, addr, datasz);
+	p += datasz;
 
 	*off += reqsz;
 	assert(p - buf == *off);
 	return 0;
 }
 
-static int encode_nsec(struct emdns *m, uint8_t *buf, int sz, int *off, int hostoff) {
+static int encode_nsec(uint8_t *buf, int sz, int *off, int hostoff) {
 	static const uint8_t bitmap[] = {0,0,0,8}; // only AAAA
 	uint16_t bitmapsz = sizeof(bitmap);
 	uint16_t datasz = 2 /*next name*/ + 2 /*bitmap size*/ + bitmapsz;
@@ -1352,11 +1488,11 @@ static int encode_nsec(struct emdns *m, uint8_t *buf, int sz, int *off, int host
 	return 0;
 }
 
-static int encode_service(struct pub_service *s, const struct key *host, uint8_t *u, int sz, int *poff) {
+static int encode_service(const uint8_t *label, size_t labelsz, const uint8_t *svc, size_t svcsz, const uint8_t *host, size_t hostsz, const uint8_t *txt, size_t txtsz, uint16_t port, uint8_t *u, int sz, int *poff, int *hostoff) {
 	// SRV
-	int reqsz = s->name.namesz + 2 /*type*/ + 2 /*class*/ + 4 /*ttl*/ + 2 /*datasz*/ + 2 /*pri*/ + 2 /*weight*/ + 2 /*port*/ + host->namesz;
+	int reqsz = 1 + labelsz + svcsz + 2 /*type*/ + 2 /*class*/ + 4 /*ttl*/ + 2 /*datasz*/ + 2 /*pri*/ + 2 /*weight*/ + 2 /*port*/ + hostsz;
 	// TXT
-	reqsz += 2 /*name*/ + 2 /*type*/ + 2 /*class*/ + 4 /*ttl*/ + 2 /*datasz*/ + s->txtsz;
+	reqsz += 2 /*name*/ + 2 /*type*/ + 2 /*class*/ + 4 /*ttl*/ + 2 /*datasz*/ + txtsz;
 	// PTR
 	reqsz += 2 /*name*/ + 2 /*type*/ + 2 /*class*/ + 4 /*ttl*/ + 2 /*datasz*/ + 2 /*srv name*/;
 
@@ -1367,29 +1503,37 @@ static int encode_service(struct pub_service *s, const struct key *host, uint8_t
 	// SRV
 	uint8_t *p = u + *poff;
 	uint16_t nameoff = (uint16_t) *poff;
-	uint16_t svcoff = nameoff + s->name.name[0] + 1;
-	memcpy(p, s->name.name, s->name.namesz);
-	p += s->name.namesz;
+	uint16_t svcoff = nameoff + (uint16_t) labelsz + 1;
+	*(p++) = (uint8_t) labelsz;
+	memcpy(p, label, labelsz);
+	p += labelsz;
+	memcpy(p, svc, svcsz);
+	p += svcsz;
 	put_big_16(p, RTYPE_SRV);
 	put_big_16(p + 2, RCLASS_IN_FLUSH);
 	put_big_32(p + 4, TTL_DEFAULT);
-	put_big_16(p + 8, 2 + 2 + 2 + host->namesz);
+	put_big_16(p + 8, (uint16_t) (2 + 2 + 2 + hostsz));
 	put_big_16(p + 10, PRIORITY_DEFAULT);
 	put_big_16(p + 12, WEIGHT_DEFAULT);
-	put_big_16(p + 14, s->port);
+	put_big_16(p + 14, port);
 	p += 16;
-	memcpy(p, host->name, host->namesz);
-	p += host->namesz;
+	if (*hostoff) {
+		put_big_16(p, LABEL_PTR16 | *hostoff);
+	} else {
+		*hostoff = (int) (p - u);
+		memcpy(p, host, hostsz);
+		p += hostsz;
+	}
 
 	// TXT
 	put_big_16(p, LABEL_PTR16 | nameoff);
 	put_big_16(p + 2, RTYPE_TXT);
 	put_big_16(p + 4, RCLASS_IN_FLUSH);
 	put_big_32(p + 6, TTL_DEFAULT);
-	put_big_16(p + 10, (uint16_t) s->txtsz);
+	put_big_16(p + 10, (uint16_t) txtsz);
     p += 12;
-	memcpy(p, s->txt, s->txtsz);
-	p += s->txtsz;
+	memcpy(p, txt, txtsz);
+	p += txtsz;
 
 	// PTR
 	put_big_16(p, LABEL_PTR16 | svcoff);
@@ -1409,12 +1553,40 @@ static int encode_service(struct pub_service *s, const struct key *host, uint8_t
 // OUTGOING MESSAGE CREATION
 ////////////////////////////
 
+int emdns_build_response(struct emdns_responder *r, char *buf, int sz) {
+	if (sz < 12) {
+		return EMDNS_MALFORMED;
+	}
+
+	int hostoff = 0;
+
+	int off = 12;
+	for (size_t i = 0; i < r->ip4n; i++) {
+		if (encode_address(r->host, r->hostsz, AF_INET, &r->ip4v[i], buf, sz, &off, &hostoff)) {
+			return EMDNS_TOO_MANY;
+		}
+	}
+	for (size_t i = 0; i < r->ip6n; i++) {
+		if (encode_address(r->host, r->hostsz, AF_INET6, &r->ip6v[i], buf, sz, &off, &hostoff)) {
+			return EMDNS_TOO_MANY;
+		}
+	}
+	for (size_t i = 0; i < r->svcn; i++) {
+		struct emdns_service *s = &r->svcv[i];
+		if (encode_service(r->label, r->labelsz, s->name, s->namesz, r->host, r->hostsz, s->txt, s->txtsz, s->port, buf, sz, &off, &hostoff)) {
+			return EMDNS_TOO_MANY;
+		}
+	}
+
+	return off;
+}
 
 static int get_next_publish(struct emdns *m, emdns_time *time, uint8_t *u, int sz) {
     emdns_time now = *time;
 	bool do_publish = false;
 	int num_publish = 0;
 	int off = 12;
+	int hostoff = 0;
 
 	for (;;) {
 		struct heap_node *hn = heap_min(&m->publish_heap);
@@ -1431,7 +1603,10 @@ static int get_next_publish(struct emdns *m, emdns_time *time, uint8_t *u, int s
 
 		if (r->type == PUBLISH_SERVICE) {
             struct pub_service *s = (struct pub_service*) r;
-			if (encode_service(s, &m->hostname, u, sz, &off)) {
+			uint8_t labelsz = s->name.name[0];
+			uint8_t *name = s->name.name;
+			uint8_t namesz = s->name.namesz;
+			if (encode_service(name+1, labelsz, name+1+labelsz, namesz-1-labelsz, m->hostname.name, m->hostname.namesz, s->txt, s->txtsz, s->port, u, sz, &off, &hostoff)) {
 				break;
 			}
 			num_publish++;
@@ -1448,12 +1623,11 @@ static int get_next_publish(struct emdns *m, emdns_time *time, uint8_t *u, int s
     }
     
     // if we are publishing something, then we should publish all local addresses
-	int hostoff = 0;
 
     for (int id = 0; id < MAX_IPS; id++) {
         struct pub_ip *r = m->user_ips[id];
 		if (r) {
-			if (encode_local_addr(m, r, u, sz, &off, &hostoff)) {
+			if (encode_address(m->hostname.name, m->hostname.namesz, r->family, r->addr, u, sz, &off, &hostoff)) {
 				break;
 			}
 			if (r->h.last_publish != now) {
@@ -1464,7 +1638,7 @@ static int get_next_publish(struct emdns *m, emdns_time *time, uint8_t *u, int s
 	}
 
 	// we only support AAAA records for the hostname. we should publish an NSEC record indicating that
-	if (hostoff && !encode_nsec(m, u, sz, &off, hostoff)) {
+	if (hostoff && !encode_nsec(u, sz, &off, hostoff)) {
 		num_publish++;
 	}
 
@@ -1646,3 +1820,5 @@ int emdns_next(struct emdns *m, emdns_time *now, void *buf, int sz) {
     *now = next_publish < next_request ? next_publish : next_request;
     return EMDNS_PENDING;
 }
+
+

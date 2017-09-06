@@ -16,6 +16,7 @@ struct answer {
 
 #define MSG_ADD WM_USER
 #define MSG_REMOVE (WM_USER + 1)
+#define MSG_IFACE_CHANGE (WM_USER + 2)
 
 // svcname must point to a string that persists until the scan thread is stopped
 void start_scan_thread(HWND window, int interface_id, struct in_addr interface_ip, const char *svcname);

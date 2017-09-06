@@ -22,6 +22,7 @@ typedef int64_t emdns_time;
 #define EMDNS_TOO_MANY -2
 #define EMDNS_MALFORMED -3
 #define EMDNS_DUPLICATE -4
+#define EMDNS_RESPOND 1
 
 // emdns_next returns the next message to be sent
 // sz is the size of the provided buffer and should correspond
@@ -40,8 +41,8 @@ int emdns_process(struct emdns *m, emdns_time time, const void *msg, int sz);
 struct emdns *emdns_new(const char *hostname);
 void emdns_free(struct emdns *m);
 
-int emdns_publish_ip6(struct emdns *m, emdns_time now, const struct in6_addr *addr);
-int emdns_publish_service(struct emdns *m, emdns_time now, const char *svc, const char *txt, uint16_t port);
+int emdns_publish_ip(struct emdns *m, emdns_time now, int family, const void *addr);
+int emdns_publish_service(struct emdns *m, emdns_time now, const struct emdns_service *svc);
 
 typedef void(*emdns_query_cb)(void *udata, const struct sockaddr *addr);
 typedef void(*emdns_scan_cb)(void *udata, const char *name, int namesz, const struct sockaddr *sa, int sasz, const char *txt, int txtsz);

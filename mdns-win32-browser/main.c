@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <fcntl.h>
 #include <io.h>
+#include <Iphlpapi.h>
 #include "../emdns.h"
 #include "scan-thread.h"
 
@@ -319,7 +320,7 @@ static void start_scan(struct mdns_browser *b) {
 	}
 }
 
-static void restart_scan(struct mdns_browser *b) {
+static void stop_scan(struct mdns_browser *b) {
 	stop_scan_thread();
 	int num = ListBox_GetCount(b->list_nodes.h);
 	for (int i = 0; i < num; i++) {
@@ -328,7 +329,32 @@ static void restart_scan(struct mdns_browser *b) {
 		free(a);
 	}
 	ListBox_ResetContent(b->list_nodes.h);
-	start_scan(b);
+}
+
+static void check_ip(struct mdns_browser *b) {
+	struct in_addr ip = b->cur_interface_ip;
+	if (!emdns_lookup_interfaces(b, &lookup_interface_ip) && ip.s_addr != b->cur_interface_ip.s_addr) {
+		stop_scan(b);
+		start_scan_thread(b->window, b->cur_interface_id, b->cur_interface_ip, g_services[b->cur_service].svcname);
+	}
+}
+
+static DWORD WINAPI interface_watcher(void* param) {
+	HWND window = (HWND) param;
+	HANDLE h = NULL;
+	OVERLAPPED ol;
+	ol.hEvent = WSACreateEvent();
+	if (NotifyAddrChange(&h, &ol) != NO_ERROR && WSAGetLastError() != WSA_IO_PENDING) {
+		CloseHandle(ol.hEvent);
+		return 1;
+	}
+
+	while (WaitForSingleObject(ol.hEvent, INFINITE) == WAIT_OBJECT_0) {
+		PostMessage(window, MSG_IFACE_CHANGE, 0, 0);
+	}
+
+	CloseHandle(ol.hEvent);
+	return 0;
 }
 
 LRESULT CALLBACK browser_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
@@ -339,40 +365,42 @@ LRESULT CALLBACK browser_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
 		PostQuitMessage(0);
 		break;
 	case WM_CREATE: {
-		CREATESTRUCT *cs = (CREATESTRUCT*) lparam;
-		b.window = hwnd;
-		b.instance = cs->hInstance;
-		compute_positions(&b, cs->cx, cs->cy);
+			CREATESTRUCT *cs = (CREATESTRUCT*) lparam;
+			b.window = hwnd;
+			b.instance = cs->hInstance;
+			compute_positions(&b, cs->cx, cs->cy);
 
-		create_control(&b, &b.label_interface, WC_STATICW, get_text(&STR_INTERFACE), WS_VISIBLE, IDC_LABEL);
-		create_control(&b, &b.combo_interface, WC_COMBOBOXW, NULL, WS_VISIBLE|CBS_DROPDOWNLIST|CBS_HASSTRINGS, IDC_INTERFACE);
+			create_control(&b, &b.label_interface, WC_STATICW, get_text(&STR_INTERFACE), WS_VISIBLE, IDC_LABEL);
+			create_control(&b, &b.combo_interface, WC_COMBOBOXW, NULL, WS_VISIBLE | CBS_DROPDOWNLIST | CBS_HASSTRINGS, IDC_INTERFACE);
 
-		create_control(&b, &b.label_service, WC_STATICW, get_text(&STR_SERVICE), WS_VISIBLE, IDC_LABEL);
-		create_control(&b, &b.combo_service, WC_COMBOBOXW, NULL, WS_VISIBLE|CBS_DROPDOWNLIST|CBS_HASSTRINGS, IDC_SERVICE);
+			create_control(&b, &b.label_service, WC_STATICW, get_text(&STR_SERVICE), WS_VISIBLE, IDC_LABEL);
+			create_control(&b, &b.combo_service, WC_COMBOBOXW, NULL, WS_VISIBLE | CBS_DROPDOWNLIST | CBS_HASSTRINGS, IDC_SERVICE);
 
-		create_control(&b, &b.list_nodes, WC_LISTBOXW, NULL, WS_VISIBLE|LBS_NOTIFY, IDC_LIST);
+			create_control(&b, &b.list_nodes, WC_LISTBOXW, NULL, WS_VISIBLE | LBS_NOTIFY, IDC_LIST);
 
-		create_control(&b, &b.label_ip, WC_STATICW, get_text(&STR_IP), WS_VISIBLE, IDC_LABEL);
-		create_control(&b, &b.static_ip, WC_STATICW, NULL, WS_VISIBLE, IDC_IP);
+			create_control(&b, &b.label_ip, WC_STATICW, get_text(&STR_IP), WS_VISIBLE, IDC_LABEL);
+			create_control(&b, &b.static_ip, WC_STATICW, NULL, WS_VISIBLE, IDC_IP);
 
-		create_control(&b, &b.label_port, WC_STATICW, get_text(&STR_PORT), WS_VISIBLE, IDC_LABEL);
-		create_control(&b, &b.static_port, WC_STATICW, NULL, WS_VISIBLE, IDC_PORT);
+			create_control(&b, &b.label_port, WC_STATICW, get_text(&STR_PORT), WS_VISIBLE, IDC_LABEL);
+			create_control(&b, &b.static_port, WC_STATICW, NULL, WS_VISIBLE, IDC_PORT);
 
-		create_control(&b, &b.button_open, WC_BUTTONW, get_text(&STR_OPEN), WS_VISIBLE, IDC_OPEN);
+			create_control(&b, &b.button_open, WC_BUTTONW, get_text(&STR_OPEN), WS_VISIBLE, IDC_OPEN);
 
-		add_services(&b);
+			add_services(&b);
 
-		if (emdns_lookup_interfaces(&b, &on_interface) || !b.interface_num) {
-			MessageBoxW(hwnd, get_text(&STR_NO_INTERFACES), get_text(&STR_ERROR), MB_OK);
-			PostQuitMessage(1);
+			if (emdns_lookup_interfaces(&b, &on_interface) || !b.interface_num) {
+				MessageBoxW(hwnd, get_text(&STR_NO_INTERFACES), get_text(&STR_ERROR), MB_OK);
+				PostQuitMessage(1);
+				break;
+			}
+
+			ComboBox_SetCurSel(b.combo_interface.h, 0);
+			ComboBox_SetCurSel(b.combo_service.h, 0);
+			start_scan(&b);
+			HANDLE h =CreateThread(NULL, 0, &interface_watcher, hwnd, 0, NULL);
+			CloseHandle(h);
 			break;
 		}
-
-		ComboBox_SetCurSel(b.combo_interface.h, 0);
-		ComboBox_SetCurSel(b.combo_service.h, 0);
-		start_scan(&b);
-		break;
-	}
 	case WM_COMMAND:
 		if (HIWORD(wparam) == LBN_SELCHANGE && LOWORD(wparam) == IDC_LIST) {
 			int idx = ListBox_GetCurSel(b.list_nodes.h);
@@ -432,7 +460,8 @@ LRESULT CALLBACK browser_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
 			}
 			
 		} else if (HIWORD(wparam) == CBN_SELCHANGE && (LOWORD(wparam) == IDC_INTERFACE || LOWORD(wparam) == IDC_SERVICE)) {
-			restart_scan(&b);
+			stop_scan(&b);
+			start_scan(&b);
 		}
 		break;
 	case WM_SIZE:
@@ -442,23 +471,26 @@ LRESULT CALLBACK browser_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
 		}
 		break;
 	case MSG_ADD: {
-		struct answer *a = (struct answer*) wparam;
-		int idx = ListBox_AddString(b.list_nodes.h, a->name);
-		ListBox_SetItemData(b.list_nodes.h, idx, a);
-		break;
-	}
-	case MSG_REMOVE: {
-		struct answer *a = (struct answer*) wparam;
-		int idx = ListBox_FindString(b.list_nodes.h, 0, a->name);
-		if (idx != LB_ERR) {
-			struct answer *a = (struct answer*) ListBox_GetItemData(b.list_nodes.h, idx);
-			free(a->text);
-			free(a);
-			ListBox_DeleteString(b.list_nodes.h, idx);
+			struct answer *a = (struct answer*) wparam;
+			int idx = ListBox_AddString(b.list_nodes.h, a->name);
+			ListBox_SetItemData(b.list_nodes.h, idx, a);
+			break;
 		}
-		free(a);
+	case MSG_REMOVE: {
+			struct answer *a = (struct answer*) wparam;
+			int idx = ListBox_FindString(b.list_nodes.h, 0, a->name);
+			if (idx != LB_ERR) {
+				struct answer *a = (struct answer*) ListBox_GetItemData(b.list_nodes.h, idx);
+				free(a->text);
+				free(a);
+				ListBox_DeleteString(b.list_nodes.h, idx);
+			}
+			free(a);
+			break;
+		}
+	case MSG_IFACE_CHANGE:
+		check_ip(&b);
 		break;
-	}
 	}
 
 	return DefWindowProcW(hwnd, msg, wparam, lparam);
