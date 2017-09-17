@@ -144,7 +144,6 @@ struct result {
 	bool have_txt;
 	bool have_addr;
 	bool published;
-	bool dirty;
 
 	struct timeout time_srv;
 	struct timeout time_ptr;
@@ -160,6 +159,10 @@ struct result {
 	char *txt; // heap allocated
 	uint16_t txtsz;
 	uint16_t port;
+
+	// temporaries used for addr priority resolution
+	bool need_to_publish;
+	struct result *publish_next;
 };
 
 // IP address categories from lowest priority to highest
@@ -188,8 +191,8 @@ struct addr {
 	struct result *results;
 	
 	// temporaries used for addr priority resolution
-	bool in_list;
-	struct addr *next;
+	bool need_to_publish;
+	struct addr *publish_next;
 };
 
 struct scan {
@@ -250,4 +253,5 @@ struct emdns {
 
 	// temporary used for processing prioritized addresses
 	struct addr *dist_addrs;
+	struct result *dist_results;
 };

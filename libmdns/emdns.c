@@ -355,6 +355,14 @@ static void delete_record(struct emdns *m, struct record *r, khash_t(cache) *h) 
     emdns_mem_free(r);
 }
 
+static void mark_result(struct emdns *m, struct result *r) {
+	if (!r->need_to_publish) {
+		r->need_to_publish = true;
+		r->publish_next = m->dist_results;
+		m->dist_results = r;
+	}
+}
+
 static void publish_result(struct result *r) {
     bool all = r->have_srv && r->have_ptr && r->have_txt && r->have_addr;
     uint8_t labelsz = r->h.key.name[0];
@@ -365,7 +373,7 @@ static void publish_result(struct result *r) {
         r->published = false;
     }
 
-    if (all && (!r->published || r->dirty)) {
+    if (all && (!r->published || r->need_to_publish)) {
         struct addr *a = r->srv;
 		int sasz;
         if (a->sa.h.sa_family == AF_INET) {
@@ -379,7 +387,7 @@ static void publish_result(struct result *r) {
         r->published = true;
     }
 
-    r->dirty = false;
+	r->need_to_publish = false;
 }
 
 static void expire_result(struct emdns *m, struct result *r) {
@@ -689,12 +697,12 @@ static int process_srv(struct emdns *m, emdns_time now, struct result *r, struct
         r->have_addr = r->srv->have_addr;
 
 		if (r->have_addr) {
-			r->dirty = true;
+			mark_result(m, r);
 		}
     }
 
     if (!r->have_srv || r->port != port) {
-        r->dirty = true;
+		mark_result(m, r);
         r->port = port;
     }
 
@@ -806,6 +814,9 @@ static int process_result(struct emdns *m, emdns_time now, struct key *k, uint16
 
     switch (rtype) {
     case RTYPE_PTR:
+		if (!r->have_ptr) {
+			mark_result(m, r);
+		}
         r->time_ptr = time;
         r->have_ptr = true;
 		r->known_timeout = now + 500 * ttl; // 50% of ttl
@@ -818,7 +829,7 @@ static int process_result(struct emdns *m, emdns_time now, struct key *k, uint16
 		}
         if (!r->have_txt || r->txtsz != datasz || memcmp(r->txt, u+dataoff, datasz)) {
             // the text data has changed
-            r->dirty = true;
+			mark_result(m, r);
             r->txt = emdns_mem_realloc(r->txt, datasz);
             if (!r->txt) {
                 goto alloc_error;
@@ -883,7 +894,10 @@ static int process_result(struct emdns *m, emdns_time now, struct key *k, uint16
 		reschedule_request(m, &r->h, next);
 	}
 
-    publish_result(r);
+	if (!r->published) {
+		mark_result(m, r);
+	}
+
     return off;
 
 alloc_error:
@@ -990,10 +1004,14 @@ static int process_addr(struct emdns *m, emdns_time now, struct key *k, uint16_t
 
         // add the address to the list to be distributed at the end of the current process loop
         // that way we find out the highest priority address before calling the callback
-        if (!r->in_list) {
-            r->in_list = true;
-            r->next = m->dist_addrs;
+        if (!r->need_to_publish) {
+            r->need_to_publish = true;
+            r->publish_next = m->dist_addrs;
             m->dist_addrs = r;
+
+			for (struct result *q = r->results; q != NULL; q = q->srv_next) {
+				mark_result(m, q);
+			}
         }
 	}
 
@@ -1010,13 +1028,7 @@ static void distribute_address(struct emdns *m, struct addr *r) {
         r->userid = 0;
     }
 
-    for (struct result *q = r->results; q != NULL; q = q->srv_next) {
-        q->have_addr = 1;
-        q->dirty = true;
-        publish_result(q);
-    }
-
-    r->in_list = false;
+    r->need_to_publish = false;
 }
 
 static int process_other(uint8_t *u, int sz, int off) {
@@ -1030,6 +1042,7 @@ static int process_response(struct emdns *m, emdns_time now, uint8_t *u, int sz,
     int off = 12;
 
     m->dist_addrs = NULL;
+	m->dist_results = NULL;
 
     while (record_num--) {
         struct key k;
@@ -1056,9 +1069,16 @@ static int process_response(struct emdns *m, emdns_time now, uint8_t *u, int sz,
         }
     }
 
-    for (struct addr *r = m->dist_addrs; r != NULL; r = r->next) {
+	// delay publishing anything to the user until we've completed processing the message
+	// that way we only call the callback once with the best answer
+
+    for (struct addr *r = m->dist_addrs; r != NULL; r = r->publish_next) {
         distribute_address(m, r);
     }
+
+	for (struct result *r = m->dist_results; r != NULL; r = r->publish_next) {
+		publish_result(r);
+	}
 
 	if (off < sz) {
 		return EMDNS_MALFORMED;

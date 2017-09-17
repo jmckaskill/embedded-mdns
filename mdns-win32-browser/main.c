@@ -472,7 +472,10 @@ LRESULT CALLBACK browser_wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpar
 		break;
 	case MSG_ADD: {
 			struct answer *a = (struct answer*) wparam;
-			int idx = ListBox_AddString(b.list_nodes.h, a->name);
+			int idx = ListBox_FindString(b.list_nodes.h, 0, a->name);
+			if (idx == LB_ERR) {
+				idx = ListBox_AddString(b.list_nodes.h, a->name);
+			}
 			ListBox_SetItemData(b.list_nodes.h, idx, a);
 			break;
 		}
